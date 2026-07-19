@@ -13,3 +13,6 @@ weasyprint>=62.3
 python-jose[cryptography]>=3.3.0
 passlib[bcrypt]>=1.7.4
 python-multipart>=0.0.9
+scholarly>=1.7.11
+
+asyncpg>=0.29.0

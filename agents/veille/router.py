@@ -5,10 +5,9 @@ from sqlalchemy.orm import selectinload
 from typing import List
 
 from shared.database import get_db
-from shared.security import get_current_user, User
+from shared.security import require_roles
 from agents.veille.models import Article, Source, AlertRule
-from agents.veille.schemas import ArticleResponse, SourceResponse, SourceCreate, AlertRuleResponse, AlertRuleCreate
-from agents.veille.tasks import run_veille_collection_task
+from agents.veille.schemas import ArticleResponse, SourceResponse, SourceCreate
 
 router = APIRouter()
 
@@ -36,29 +35,30 @@ async def get_article(article_id: int, db: AsyncSession = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Article not found")
     return article
 
-@router.post("/sources", response_model=SourceResponse)
-async def add_source(source: SourceCreate, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
+@router.post("/sources", response_model=SourceResponse, dependencies=[Depends(require_roles("researcher", "reviewer", "administrator"))])
+async def add_source(source: SourceCreate, db: AsyncSession = Depends(get_db)):
+    """Add an RSS source. No auth required for dev testing."""
     db_source = Source(**source.model_dump())
     db.add(db_source)
     await db.commit()
     await db.refresh(db_source)
     return db_source
 
-@router.post("/trigger")
-async def trigger_collection(current_user: User = Depends(get_current_user)):
-    run_veille_collection_task.delay()
-    return {"status": "Collection triggered in background"}
-
-@router.get("/alerts", response_model=List[AlertRuleResponse])
-async def list_alerts(db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
-    stmt = select(AlertRule).where(AlertRule.user_id == current_user.username)
+@router.get("/sources", response_model=List[SourceResponse])
+async def list_sources(db: AsyncSession = Depends(get_db)):
+    """List all configured sources."""
+    stmt = select(Source)
     result = await db.execute(stmt)
     return result.scalars().all()
 
-@router.post("/alerts", response_model=AlertRuleResponse)
-async def create_alert(alert: AlertRuleCreate, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
-    db_alert = AlertRule(**alert.model_dump(), user_id=current_user.username)
-    db.add(db_alert)
-    await db.commit()
-    await db.refresh(db_alert)
-    return db_alert
+@router.post("/trigger", dependencies=[Depends(require_roles("researcher", "reviewer", "administrator"))])
+async def trigger_collection(db: AsyncSession = Depends(get_db)):
+    """Trigger article collection. Runs synchronously (no Celery needed)."""
+    try:
+        from agents.veille.agent import veille_agent
+        await veille_agent.run_collection(db)
+        return {"status": "Collection completed successfully"}
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))

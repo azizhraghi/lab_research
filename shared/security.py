@@ -1,77 +1,96 @@
-from datetime import datetime, timedelta
-from typing import Optional, Any
-from jose import JWTError, jwt
-from passlib.context import CryptContext
-from pydantic import BaseModel
+from collections.abc import Callable
+from typing import Optional
+
+import httpx
 from fastapi import Depends, HTTPException, status
-from fastapi.security import OAuth2PasswordBearer
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from pydantic import BaseModel
+
 from shared.config import settings
 
-# In a real app, load this from environment variables
-SECRET_KEY = "super-secret-key-for-jwt-signing"
-ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 60
 
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login", auto_error=False)
+bearer_scheme = HTTPBearer(auto_error=False)
 
-class Token(BaseModel):
-    access_token: str
-    token_type: str
-
-class TokenData(BaseModel):
-    username: Optional[str] = None
-    permissions: list[str] = []
 
 class User(BaseModel):
-    username: str
-    permissions: list[str] = []
+    id: str
+    email: Optional[str] = None
+    role: str = "researcher"
 
-def verify_password(plain_password: str, hashed_password: str) -> bool:
-    return pwd_context.verify(plain_password, hashed_password)
 
-def get_password_hash(password: str) -> str:
-    return pwd_context.hash(password)
+def _authentication_unavailable() -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        detail="Authentication is not configured for this environment.",
+    )
 
-def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
-    to_encode = data.copy()
-    if expires_delta:
-        expire = datetime.utcnow() + expires_delta
-    else:
-        expire = datetime.utcnow() + timedelta(minutes=15)
-    to_encode.update({"exp": expire})
-    encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
-    return encoded_jwt
 
-def decode_access_token(token: str) -> Optional[TokenData]:
-    try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        username: str = payload.get("sub")
-        permissions: list[str] = payload.get("permissions", [])
-        if username is None:
-            return None
-        return TokenData(username=username, permissions=permissions)
-    except JWTError:
-        return None
+async def get_current_user(
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(bearer_scheme),
+) -> User:
+    """Validate a Supabase-issued user token before serving the laboratory API."""
+    if not settings.SUPABASE_URL or not settings.SUPABASE_PUBLISHABLE_KEY:
+        raise _authentication_unavailable()
 
-def check_permissions(required_permissions: list[str], token_data: TokenData) -> bool:
-    """Check if the user has all required permissions."""
-    user_perms = set(token_data.permissions)
-    return all(p in user_perms for p in required_permissions)
-
-async def get_current_user(token: Optional[str] = Depends(oauth2_scheme)) -> User:
-    """FastAPI dependency that extracts and validates the current user from a JWT.
-    During development, returns a default dev user if no token is provided."""
-    if token is None:
-        # Dev fallback — remove in production
-        return User(username="dev_user", permissions=["admin"])
-    
-    token_data = decode_access_token(token)
-    if token_data is None:
+    if not credentials or credentials.scheme.lower() != "bearer":
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid or expired token",
+            detail="Authentication is required.",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    return User(username=token_data.username, permissions=token_data.permissions)
 
+    try:
+        async with httpx.AsyncClient(timeout=settings.SUPABASE_AUTH_TIMEOUT_SECONDS) as client:
+            response = await client.get(
+                settings.supabase_auth_url,
+                headers={
+                    "apikey": settings.SUPABASE_PUBLISHABLE_KEY,
+                    "Authorization": f"Bearer {credentials.credentials}",
+                },
+            )
+    except httpx.RequestError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Authentication service is unavailable.",
+        ) from exc
+
+    if response.status_code != status.HTTP_200_OK:
+        if 400 <= response.status_code < 500:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="The access token is invalid or expired.",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Authentication service is unavailable.",
+        )
+
+    payload = response.json()
+    user_id = payload.get("id")
+    if not isinstance(user_id, str) or not user_id:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="The access token does not identify a user.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    # app_metadata is server-controlled in Supabase; user_metadata must never set roles.
+    app_metadata = payload.get("app_metadata") or {}
+    role = app_metadata.get("lab_role", "researcher")
+    if role not in {"researcher", "reviewer", "administrator"}:
+        role = "researcher"
+
+    return User(id=user_id, email=payload.get("email"), role=role)
+
+
+def require_roles(*allowed_roles: str) -> Callable:
+    async def require_role(user: User = Depends(get_current_user)) -> User:
+        if user.role not in allowed_roles:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Your laboratory role does not permit this operation.",
+            )
+        return user
+
+    return require_role

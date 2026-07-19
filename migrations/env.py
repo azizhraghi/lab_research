@@ -1,4 +1,4 @@
-import asyncio
+﻿import asyncio
 from logging.config import fileConfig
 
 from sqlalchemy import pool
@@ -18,6 +18,10 @@ from shared.database import Base
 
 # Import all models here so Alembic can discover them
 from agents.veille import models as veille_models
+from agents.bibliometrie import models as biblio_models
+from agents.digitaltwin import models as digitaltwin_models
+from agents.simulation import models as simulation_models
+from agents.optimisation import models as optimisation_models
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.
@@ -99,3 +103,5 @@ if context.is_offline_mode():
     run_migrations_offline()
 else:
     run_migrations_online()
+
+

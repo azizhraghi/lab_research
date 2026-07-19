@@ -1,31 +1,45 @@
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+
 class Settings(BaseSettings):
     PROJECT_NAME: str = "Intern AI Agents Lab"
     VERSION: str = "1.0.0"
-    
-    # Database
+
+    DATABASE_URL: str = "sqlite+aiosqlite:///./multiagent.db"
+    CREATE_SCHEMA_ON_STARTUP: bool = False
+
     POSTGRES_USER: str = "admin"
     POSTGRES_PASSWORD: str = "adminpassword"
     POSTGRES_DB: str = "lab_db"
     POSTGRES_HOST: str = "localhost"
     POSTGRES_PORT: str = "5432"
-    
-    # Redis
+
     REDIS_HOST: str = "localhost"
     REDIS_PORT: int = 6379
-    
-    # Mistral AI
+
     MISTRAL_API_KEY: str = ""
-    
+
+    SUPABASE_URL: str = ""
+    SUPABASE_PUBLISHABLE_KEY: str = ""
+    SUPABASE_AUTH_TIMEOUT_SECONDS: float = 5.0
+
     @property
     def database_url(self) -> str:
-        return f"sqlite+aiosqlite:///./multiagent.db"
-    
+        return self.DATABASE_URL
+
     @property
     def redis_url(self) -> str:
         return f"redis://{self.REDIS_HOST}:{self.REDIS_PORT}/0"
-    
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+
+    @property
+    def supabase_auth_url(self) -> str:
+        return f"{self.SUPABASE_URL.rstrip('/')}/auth/v1/user"
+
+    model_config = SettingsConfigDict(
+        env_file=(".env", ".env.supabase.local"),
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
+
 
 settings = Settings()

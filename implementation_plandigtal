@@ -1,0 +1,166 @@
+# Digital Twin Agent — Irrigated Parcels
+
+Build the **Agent Jumeaux Numériques** for the `intern` project. This agent manages a virtual replica of irrigated parcels, ingests sensor readings, computes irrigation recommendations via a physics-based model, and lets researchers run "what-if" simulation scenarios — all powered by Mistral AI for natural-language rationale generation.
+
+## Scope
+
+From the cahier de charge: *"synchronisation des jumeaux numériques (bassin versant, parcelles irriguées, réseaux hydrauliques)"*
+
+For the MVP we focus on **irrigated parcels** — this is the most concrete domain and we already have a proven irrigation algorithm from the `internship` project that we can port. Bassin versant and réseaux hydrauliques can be added as extensions later.
+
+## Reference Code
+
+The `internship` project (Django) contains a working irrigation recommendation service in [services.py](file:///c:/Users/aziz/OneDrive/Bureau/internship/backend/lab/services.py) and data models in [models.py](file:///c:/Users/aziz/OneDrive/Bureau/internship/backend/lab/models.py). We will **port the science** (the `calculate_irrigation_recommendation` function) into the FastAPI/async architecture of the `intern` project.
+
+---
+
+## Proposed Changes
+
+### 1. Backend — Models
+
+#### [NEW] [models.py](file:///c:/Users/aziz/OneDrive/Bureau/intern/agents/digitaltwin/models.py)
+
+SQLAlchemy async models, mirroring the `internship` project's Django models:
+
+| Model | Purpose |
+|-------|---------|
+| `Parcel` | An irrigated parcel with GPS, soil type, crop type, field capacity, wilting point |
+| `SensorReading` | Time-series IoT data: soil moisture, rainfall, ET, temperature |
+| `IrrigationRecommendation` | AI-generated irrigation advice with water balance, confidence, rationale |
+| `SimulationScenario` | A "what-if" scenario (e.g. "30% less rain") with computed results |
+
+---
+
+### 2. Backend — Schemas
+
+#### [NEW] [schemas.py](file:///c:/Users/aziz/OneDrive/Bureau/intern/agents/digitaltwin/schemas.py)
+
+Pydantic schemas for API request/response:
+- `ParcelCreate` / `ParcelResponse`
+- `SensorReadingCreate` / `SensorReadingResponse`
+- `IrrigationRecommendationResponse`
+- `SimulationRequest` / `SimulationResponse`
+
+---
+
+### 3. Backend — Services (the science)
+
+#### [NEW] [irrigation.py](file:///c:/Users/aziz/OneDrive/Bureau/intern/agents/digitaltwin/services/irrigation.py)
+
+Port the `calculate_irrigation_recommendation` function from the `internship` project. This is a **physics-based water balance model**:
+- Input: soil moisture, field capacity, wilting point, rainfall, evapotranspiration, crop coefficient
+- Output: water balance, recommended irrigation (mm), confidence score, text rationale
+- Crop coefficients for: wheat (0.95), olive (0.65), citrus (0.85), vegetable (1.05), forage (1.10)
+
+#### [NEW] [simulator.py](file:///c:/Users/aziz/OneDrive/Bureau/intern/agents/digitaltwin/services/simulator.py)
+
+Simulation engine that runs "what-if" scenarios on the irrigation model:
+- Takes a parcel + modifier (e.g. `rainfall_factor: 0.7` = 30% less rain)
+- Runs the irrigation model with modified inputs
+- Uses Mistral AI to generate a natural-language analysis comparing baseline vs. modified scenario
+
+---
+
+### 4. Backend — Agent
+
+#### [NEW] [agent.py](file:///c:/Users/aziz/OneDrive/Bureau/intern/agents/digitaltwin/agent.py)
+
+`DigitalTwinAgent(BaseAgent)` with methods:
+- `ingest_reading(parcel_id, reading_data)` — store sensor reading + auto-generate recommendation if soil moisture is below threshold
+- `generate_recommendation(parcel_id)` — compute irrigation advice from latest reading
+- `run_simulation(parcel_id, scenario)` — execute a what-if scenario
+
+---
+
+### 5. Backend — Router (API)
+
+#### [NEW] [router.py](file:///c:/Users/aziz/OneDrive/Bureau/intern/agents/digitaltwin/router.py)
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/twin/parcels` | GET | List all parcels |
+| `/api/twin/parcels` | POST | Create a parcel |
+| `/api/twin/parcels/{id}` | GET | Get parcel detail with latest readings |
+| `/api/twin/parcels/{id}/readings` | GET | Get sensor readings for a parcel |
+| `/api/twin/parcels/{id}/readings` | POST | Ingest a new sensor reading |
+| `/api/twin/parcels/{id}/readings/csv` | POST | Bulk import sensor readings from CSV |
+| `/api/twin/parcels/{id}/recommend` | POST | Generate irrigation recommendation |
+| `/api/twin/parcels/{id}/simulate` | POST | Run a what-if simulation |
+| `/api/twin/recommendations` | GET | List all recommendations |
+
+---
+
+### 6. Backend — Registration
+
+#### [MODIFY] [main.py](file:///c:/Users/aziz/OneDrive/Bureau/intern/api/main.py)
+
+- Import `agents.digitaltwin.models` for table auto-creation
+- Import and mount `digitaltwin.router` at `/api/twin`
+
+---
+
+### 7. Frontend — Digital Twin Page
+
+#### [NEW] [DigitalTwin.jsx](file:///c:/Users/aziz/OneDrive/Bureau/intern/frontend/src/pages/DigitalTwin.jsx)
+
+Interactive dashboard with 3 panels:
+
+1. **Parcel List & Map** — cards showing each parcel with status indicator (green/yellow/red based on soil moisture)
+2. **Parcel Detail** — sensor readings chart (soil moisture over time), latest recommendation card
+3. **Simulation Panel** — form to run "what-if" scenarios with AI-generated analysis
+
+#### [MODIFY] [api.js](file:///c:/Users/aziz/OneDrive/Bureau/intern/frontend/src/lib/api.js)
+
+Add `twin` API client section with all endpoint calls.
+
+#### [MODIFY] [App.jsx](file:///c:/Users/aziz/OneDrive/Bureau/intern/frontend/src/App.jsx)
+
+Add route: `/digital-twin` → `<DigitalTwin />`
+
+#### [MODIFY] [Sidebar.jsx](file:///c:/Users/aziz/OneDrive/Bureau/intern/frontend/src/components/Sidebar.jsx)
+
+Add "Digital Twin" nav link with a 🌿 icon.
+
+---
+
+### 8. Seed Data
+
+#### [NEW] [seed_parcels.py](file:///c:/Users/aziz/OneDrive/Bureau/intern/scripts/seed_parcels.py)
+
+Script that populates demo parcels + sensor readings so the dashboard has data immediately:
+- 3 parcels: wheat field, olive grove, citrus orchard (with realistic Tunisian GPS coordinates)
+- 30 days of synthetic sensor data per parcel (soil moisture, rainfall, ET, temperature)
+
+---
+
+## Open Questions
+
+> [!IMPORTANT]
+> **CSV import**: Should the sensor reading CSV import be part of the MVP, or can your teammate add it later? I included it because it's a common lab workflow (export from a logger → upload CSV).
+
+> [!NOTE]
+> **Simulation depth**: For the MVP, simulations adjust rainfall/ET by a percentage factor. More complex scenarios (soil type changes, crop rotation) can be added later. Is this OK?
+
+---
+
+## Verification Plan
+
+### Automated Tests
+```bash
+# Start backend
+.\.venv\Scripts\Activate.ps1; uvicorn api.main:app --reload --port 8000
+
+# Seed demo data
+.\.venv\Scripts\python.exe scripts/seed_parcels.py
+
+# Test endpoints
+curl http://localhost:8000/api/twin/parcels
+curl -X POST http://localhost:8000/api/twin/parcels/1/recommend
+curl -X POST http://localhost:8000/api/twin/parcels/1/simulate -d '{"rainfall_factor": 0.7}'
+```
+
+### Manual Verification
+- Open `http://localhost:5173/digital-twin` and verify:
+  - Parcels display with color-coded status
+  - Clicking a parcel shows sensor chart + recommendation
+  - Running a simulation shows AI-generated comparison

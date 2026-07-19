@@ -16,7 +16,8 @@ env/
 *.db
 
 # Environment
-.env
+.env*
+node_modules/
 
 # IDE
 .vscode/

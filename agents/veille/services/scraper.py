@@ -5,9 +5,9 @@ import datetime
 
 async def fetch_rss_feed(url: str) -> List[Dict[str, Any]]:
     """Fetch and parse an RSS/Atom feed."""
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(follow_redirects=True) as client:
         try:
-            response = await client.get(url, timeout=10.0)
+            response = await client.get(url, timeout=30.0)
             response.raise_for_status()
             
             root = ET.fromstring(response.text)
