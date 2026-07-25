@@ -1,0 +1,27 @@
+# Environnement virtuel
+.venv/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Variables d'environnement (sécurité)
+.env
+*.env
+
+# Base de données locale
+*.db
+*.sqlite
+
+# VS Code
+.vscode/
+
+# Logs
+*.log
+
+# Fichiers temporaires
+create_tables.py
+.env

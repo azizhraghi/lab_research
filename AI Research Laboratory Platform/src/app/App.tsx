@@ -22,6 +22,18 @@ import {
   XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
   PieChart as RePieChart, Pie, Cell, RadialBarChart, RadialBar
 } from "recharts";
+import { useAuth } from "../auth/AuthContext";
+import type { Article } from "../api/types";
+import { useArticles, useTriggerScrape } from "../api/veille";
+import {
+  useParcels,
+  useParcel,
+  useParcelForecast,
+  useRefreshForecast,
+  useRunTwinSimulation,
+  useSimulationRuns,
+  useOptimisationRuns,
+} from "../api/digitaltwin";
 
 // ─── Types ─────────────────────────────────────────────────────────────────
 type Page =
@@ -1087,6 +1099,17 @@ function AgentsPage() {
 function DigitalTwinsPage() {
   const [scenario, setScenario] = useState("baseline");
   const [timeSlider, setTimeSlider] = useState(50);
+  const [selectedId, setSelectedId] = useState<number | null>(null);
+
+  const { data: parcels, isLoading: parcelsLoading } = useParcels();
+  const effectiveId = selectedId ?? (parcels && parcels.length ? parcels[0].id : null);
+  const { data: parcel, isLoading: parcelLoading } = useParcel(effectiveId);
+  const { data: forecast } = useParcelForecast(effectiveId);
+  const refreshForecast = useRefreshForecast();
+  const runSim = useRunTwinSimulation();
+  const { data: simRuns } = useSimulationRuns(effectiveId);
+  const { data: optRuns } = useOptimisationRuns(effectiveId);
+
   const simData = Array.from({ length: 12 }, (_, i) => ({
     month: ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"][i],
     baseline: 85 + Math.sin(i / 2) * 15,
@@ -1094,15 +1117,66 @@ function DigitalTwinsPage() {
     rcp85: 72 + Math.sin(i / 2) * 22 - i * 1.2,
   }));
 
+  if (parcelsLoading) {
+    return (
+      <div className="h-full overflow-y-auto scrollbar-hide p-6">
+        <div className="animate-pulse bg-card border border-border rounded-2xl h-40" />
+      </div>
+    );
+  }
+
+  if (!parcels || parcels.length === 0) {
+    return (
+      <div className="h-full overflow-y-auto scrollbar-hide p-6">
+        <div className="bg-card border border-border rounded-2xl p-8 text-center">
+          <h2 className="text-xl font-bold text-foreground font-jakarta">Digital Twins</h2>
+          <p className="text-sm text-muted-foreground mt-2">
+            No parcels configured yet. Create one via the API (POST /api/twin/parcels) to start simulating.
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  const sensorRows = parcel ? [
+    { label: "Crop Type", value: parcel.crop_type, status: "normal" },
+    { label: "Area", value: `${parcel.area_ha} ha`, status: "normal" },
+    { label: "Soil Type", value: parcel.soil_type, status: "normal" },
+    { label: "Field Capacity", value: `${parcel.field_capacity_mm} mm`, status: "normal" },
+    { label: "Wilting Point", value: `${parcel.wilting_point_mm} mm`, status: "normal" },
+    { label: "Coordinates", value: `${parcel.latitude.toFixed(3)}, ${parcel.longitude.toFixed(3)}`, status: "normal" },
+  ] : [];
+  const totalPrecip = forecast?.reduce((n, f) => n + f.precipitation_mm, 0) ?? 0;
+
   return (
     <div className="h-full overflow-y-auto scrollbar-hide">
       <div className="p-6 pb-4">
-        <div className="flex items-center justify-between mb-4">
+        <div className="flex items-center justify-between mb-4 flex-wrap gap-3">
           <div>
-            <h2 className="text-xl font-bold text-foreground font-jakarta">Digital Twins — Aquifer System</h2>
-            <p className="text-sm text-muted-foreground">Real-time digital replica · Sync rate 98.7% · Last updated 4s ago</p>
+            <h2 className="text-xl font-bold text-foreground font-jakarta">
+              Digital Twin — {parcel?.name ?? "Loading…"}
+            </h2>
+            <p className="text-sm text-muted-foreground">
+              {parcel
+                ? `${parcel.code} · ${parcel.crop_type} · ${forecast?.length ?? 0}-day forecast (${totalPrecip.toFixed(0)} mm precip)`
+                : "Real-time digital replica"}
+            </p>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-wrap">
+            <select
+              value={effectiveId ?? ""}
+              onChange={e => setSelectedId(Number(e.target.value))}
+              className="px-3 py-1.5 rounded-xl text-xs font-semibold bg-muted text-foreground border border-border focus:outline-none focus:ring-2 focus:ring-primary/30"
+            >
+              {parcels.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+            </select>
+            <button
+              onClick={() => effectiveId && refreshForecast.mutate(effectiveId)}
+              disabled={refreshForecast.isPending}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold bg-muted text-foreground hover:bg-secondary disabled:opacity-60 transition-colors"
+            >
+              <RefreshCw size={13} className={refreshForecast.isPending ? "animate-spin" : ""} /> Refresh forecast
+            </button>
             {["baseline", "rcp45", "rcp85"].map(s => (
               <button key={s} onClick={() => setScenario(s)}
                 className={`px-3 py-1.5 rounded-xl text-xs font-semibold transition-colors uppercase
@@ -1145,14 +1219,10 @@ function DigitalTwinsPage() {
               </div>
             </div>
           </div>
-          {/* Sensor readings */}
+          {/* Sensor readings (live parcel data) */}
           <div className="p-4 space-y-2">
-            {[
-              { label: "Water Table Depth", value: "12.4 m", status: "normal" },
-              { label: "Recharge Rate", value: "2.8 mm/day", status: "normal" },
-              { label: "Extraction Rate", value: "4.2 Mm³/yr", status: "warning" },
-              { label: "Conductivity", value: "284 µS/cm", status: "normal" },
-            ].map(s => (
+            {parcelLoading && <p className="text-xs text-muted-foreground">Loading parcel…</p>}
+            {sensorRows.map(s => (
               <div key={s.label} className="flex items-center justify-between text-xs">
                 <span className="text-muted-foreground">{s.label}</span>
                 <div className="flex items-center gap-2">
@@ -1251,9 +1321,47 @@ function DigitalTwinsPage() {
                   <input type="range" min={c.min} max={c.max} defaultValue={c.value} className="w-full accent-primary" />
                 </div>
               ))}
-              <button className="w-full py-2 bg-gradient-to-r from-primary to-[#2D9C72] text-white text-xs font-bold rounded-xl hover:shadow-lg hover:shadow-primary/20 transition-all mt-2 flex items-center justify-center gap-2">
-                <Play size={13} /> Run Simulation
+              <button
+                onClick={() => effectiveId && runSim.mutate(effectiveId)}
+                disabled={runSim.isPending}
+                className="w-full py-2 bg-gradient-to-r from-primary to-[#2D9C72] text-white text-xs font-bold rounded-xl hover:shadow-lg hover:shadow-primary/20 transition-all mt-2 flex items-center justify-center gap-2 disabled:opacity-60"
+              >
+                <Play size={13} /> {runSim.isPending ? "Running…" : "Run Simulation"}
               </button>
+              {runSim.isError && <p className="text-[10px] text-red-600 mt-1">{(runSim.error as Error).message}</p>}
+            </div>
+          </div>
+
+          {/* Recent runs */}
+          <div className="bg-card border border-border rounded-2xl p-4">
+            <h3 className="text-sm font-bold text-foreground font-jakarta mb-3">Recent Runs</h3>
+            <div className="space-y-3 text-xs">
+              <div>
+                <p className="font-semibold text-foreground mb-1">Simulation</p>
+                {simRuns && simRuns.length > 0 ? (
+                  <ul className="space-y-1">
+                    {simRuns.slice(0, 3).map(r => (
+                      <li key={r.id} className="flex justify-between text-muted-foreground">
+                        <span className="truncate pr-2">{r.scenario_name}</span>
+                        <span className="font-mono">{new Date(r.created_at).toLocaleDateString()}</span>
+                      </li>
+                    ))}
+                  </ul>
+                ) : <p className="text-muted-foreground">No runs yet.</p>}
+              </div>
+              <div>
+                <p className="font-semibold text-foreground mb-1">Optimisation</p>
+                {optRuns && optRuns.length > 0 ? (
+                  <ul className="space-y-1">
+                    {optRuns.slice(0, 3).map(r => (
+                      <li key={r.id} className="flex justify-between text-muted-foreground">
+                        <span className="truncate pr-2">{r.run_name}</span>
+                        <span className="font-mono">{new Date(r.created_at).toLocaleDateString()}</span>
+                      </li>
+                    ))}
+                  </ul>
+                ) : <p className="text-muted-foreground">No runs yet.</p>}
+              </div>
             </div>
           </div>
         </div>
@@ -1360,22 +1468,42 @@ function IoTPage() {
 
 // ─── SCIENTIFIC WATCH PAGE ───────────────────────────────────────────────────
 function WatchPage() {
-  const papers = [
-    { id: 1, title: "Artificial Intelligence in Hydrological Forecasting: A Systematic Review", source: "Nature Water", date: "Sep 2, 2024", relevance: 98, tags: ["AI", "Hydrology"], summary: "Comprehensive meta-analysis of 847 AI-based hydrological models published 2018–2024, identifying transformer architectures as dominant paradigm." },
-    { id: 2, title: "Digital Twin Applications in Climate Adaptation: Emerging Frameworks", source: "Nature Climate Change", date: "Sep 1, 2024", relevance: 94, tags: ["Digital Twins", "Climate"], summary: "Reviews 156 digital twin implementations for climate adaptation, highlighting real-time data assimilation as critical success factor." },
-    { id: 3, title: "IoT-Based Environmental Monitoring at Scale: Lessons from 50 Deployments", source: "Environmental Science & Technology", date: "Aug 30, 2024", relevance: 89, tags: ["IoT", "Monitoring"], summary: "Synthesizes operational data from 50 large-scale IoT deployments across 22 countries, proposing unified data quality framework." },
-    { id: 4, title: "Groundwater Depletion Under SSP Scenarios: GRACE-FO Satellite Analysis", source: "Geophysical Research Letters", date: "Aug 29, 2024", relevance: 92, tags: ["Groundwater", "Remote Sensing"], summary: "GRACE-FO data reveals 340 km³/yr global groundwater depletion acceleration under SSP3-7.0, exceeding IPCC projections by 28%." },
-  ];
+  const { data: articles, isLoading, error, refetch } = useArticles();
+  const trigger = useTriggerScrape();
+
+  const formatDate = (iso?: string | null) =>
+    iso ? new Date(iso).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }) : "—";
+  const hostOf = (url?: string | null) => {
+    if (!url) return "Source";
+    try { return new URL(url).hostname.replace(/^www\./, ""); } catch { return "Source"; }
+  };
+  const relevanceOf = (a: Article) => {
+    const c = a.tags[0]?.confidence;
+    return typeof c === "number" ? Math.round(c * 100) : a.tags.length * 20 + 40;
+  };
+  const summaryOf = (a: Article) => a.summaries[0]?.summary_text || a.abstract || "No summary available yet.";
 
   return (
     <div className="p-6 space-y-5 overflow-y-auto h-full scrollbar-hide">
       <div className="flex items-center justify-between">
         <div>
           <h2 className="text-xl font-bold text-foreground font-jakarta">Scientific Watch</h2>
-          <p className="text-sm text-muted-foreground">847 papers scanned today · 12 high-relevance alerts · AI-curated</p>
+          <p className="text-sm text-muted-foreground">
+            {articles ? `${articles.length} article${articles.length === 1 ? "" : "s"} · AI-curated scientific watch` : "AI-curated scientific watch"}
+          </p>
         </div>
-        <div className="flex items-center gap-2 text-xs text-primary font-semibold bg-primary/8 px-3 py-1.5 rounded-xl">
-          <Eye size={14} /> Watched: 34 keywords
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => trigger.mutate()}
+            disabled={trigger.isPending}
+            className="flex items-center gap-1.5 text-xs font-semibold bg-primary text-white px-3 py-1.5 rounded-xl hover:bg-primary/90 disabled:opacity-60 transition-colors"
+          >
+            <RefreshCw size={13} className={trigger.isPending ? "animate-spin" : ""} />
+            {trigger.isPending ? "Collecting…" : "Trigger scrape"}
+          </button>
+          <div className="flex items-center gap-2 text-xs text-primary font-semibold bg-primary/8 px-3 py-1.5 rounded-xl">
+            <Eye size={14} /> Live feed
+          </div>
         </div>
       </div>
 
@@ -1391,40 +1519,75 @@ function WatchPage() {
         </div>
       </div>
 
-      {/* Papers */}
+      {/* Articles */}
       <div className="space-y-4">
-        {papers.map(p => (
-          <div key={p.id} className="bg-card border border-border rounded-2xl p-5 hover:shadow-md hover:border-primary/20 transition-all group">
-            <div className="flex items-start gap-4">
-              <div className="flex-1">
-                <div className="flex items-center gap-2 mb-2">
-                  <span className="text-[10px] font-bold text-primary bg-primary/8 px-2 py-0.5 rounded-full">{p.source}</span>
-                  <span className="text-[10px] text-muted-foreground">{p.date}</span>
-                  {p.tags.map(t => <span key={t} className="text-[10px] bg-muted text-muted-foreground px-2 py-0.5 rounded-full">{t}</span>)}
-                </div>
-                <h3 className="text-sm font-bold text-foreground group-hover:text-primary transition-colors mb-2">{p.title}</h3>
-                <p className="text-xs text-muted-foreground leading-relaxed">{p.summary}</p>
-              </div>
-              <div className="shrink-0 text-center">
-                <div className={`w-12 h-12 rounded-xl flex items-center justify-center text-lg font-extrabold font-jakarta
-                  ${p.relevance >= 95 ? "bg-emerald-100 text-emerald-700" : p.relevance >= 88 ? "bg-amber-100 text-amber-700" : "bg-blue-100 text-blue-700"}`}>
-                  {p.relevance}
-                </div>
-                <div className="text-[9px] text-muted-foreground mt-1">Relevance</div>
-              </div>
+        {isLoading && (
+          Array.from({ length: 4 }).map((_, i) => (
+            <div key={i} className="bg-card border border-border rounded-2xl p-5 animate-pulse">
+              <div className="h-3 w-24 bg-muted rounded-full mb-3" />
+              <div className="h-4 w-3/4 bg-muted rounded mb-2" />
+              <div className="h-3 w-full bg-muted rounded" />
             </div>
-            <div className="flex items-center gap-3 mt-3 pt-3 border-t border-border">
-              <button className="flex items-center gap-1 text-[10px] text-muted-foreground hover:text-primary transition-colors"><BookMarked size={12} /> Save</button>
-              <button className="flex items-center gap-1 text-[10px] text-muted-foreground hover:text-primary transition-colors"><Share2 size={12} /> Share</button>
-              <button className="flex items-center gap-1 text-[10px] text-muted-foreground hover:text-primary transition-colors"><ExternalLink size={12} /> Full Paper</button>
-              <div className="ml-auto">
-                <button className="flex items-center gap-1 text-[10px] font-semibold text-white bg-primary px-3 py-1 rounded-lg hover:bg-primary/90 transition-colors">
-                  <Brain size={11} /> AI Summary
-                </button>
-              </div>
-            </div>
+          ))
+        )}
+
+        {error && (
+          <div className="bg-red-50 border border-red-200 rounded-2xl p-5 text-sm text-red-700">
+            <p className="font-semibold">Could not load the watch feed.</p>
+            <p className="text-xs mt-1">{(error as Error).message}</p>
+            <button onClick={() => refetch()} className="mt-3 text-xs font-semibold underline">Retry</button>
           </div>
-        ))}
+        )}
+
+        {!isLoading && !error && articles && articles.length === 0 && (
+          <div className="bg-card border border-border rounded-2xl p-8 text-center">
+            <p className="text-sm font-semibold text-foreground">No articles collected yet</p>
+            <p className="text-xs text-muted-foreground mt-1 mb-4">Trigger a scrape to populate the scientific watch feed.</p>
+            <button onClick={() => trigger.mutate()} disabled={trigger.isPending}
+              className="inline-flex items-center gap-1.5 text-xs font-semibold bg-primary text-white px-4 py-2 rounded-xl hover:bg-primary/90 disabled:opacity-60">
+              <RefreshCw size={13} className={trigger.isPending ? "animate-spin" : ""} /> Trigger scrape
+            </button>
+          </div>
+        )}
+
+        {!isLoading && !error && articles?.map(a => {
+          const relevance = relevanceOf(a);
+          return (
+            <div key={a.id} className="bg-card border border-border rounded-2xl p-5 hover:shadow-md hover:border-primary/20 transition-all group">
+              <div className="flex items-start gap-4">
+                <div className="flex-1">
+                  <div className="flex items-center gap-2 mb-2 flex-wrap">
+                    <span className="text-[10px] font-bold text-primary bg-primary/8 px-2 py-0.5 rounded-full">{hostOf(a.url)}</span>
+                    <span className="text-[10px] text-muted-foreground">{formatDate(a.published_at ?? a.collected_at)}</span>
+                    {a.tags.map(t => <span key={t.tag} className="text-[10px] bg-muted text-muted-foreground px-2 py-0.5 rounded-full">{t.tag}</span>)}
+                  </div>
+                  <h3 className="text-sm font-bold text-foreground group-hover:text-primary transition-colors mb-2">{a.title}</h3>
+                  <p className="text-xs text-muted-foreground leading-relaxed">{summaryOf(a)}</p>
+                  {a.authors && a.authors.length > 0 && (
+                    <p className="text-[10px] text-muted-foreground mt-2">{a.authors.join(", ")}</p>
+                  )}
+                </div>
+                <div className="shrink-0 text-center">
+                  <div className={`w-12 h-12 rounded-xl flex items-center justify-center text-lg font-extrabold font-jakarta
+                    ${relevance >= 95 ? "bg-emerald-100 text-emerald-700" : relevance >= 88 ? "bg-amber-100 text-amber-700" : "bg-blue-100 text-blue-700"}`}>
+                    {relevance}
+                  </div>
+                  <div className="text-[9px] text-muted-foreground mt-1">Relevance</div>
+                </div>
+              </div>
+              <div className="flex items-center gap-3 mt-3 pt-3 border-t border-border">
+                {a.url && (
+                  <a href={a.url} target="_blank" rel="noreferrer" className="flex items-center gap-1 text-[10px] text-muted-foreground hover:text-primary transition-colors">
+                    <ExternalLink size={12} /> Full Paper
+                  </a>
+                )}
+                {a.summaries.length > 0 && (
+                  <span className="flex items-center gap-1 text-[10px] text-muted-foreground"><Brain size={11} /> AI Summary</span>
+                )}
+              </div>
+            </div>
+          );
+        })}
       </div>
     </div>
   );
@@ -1498,8 +1661,13 @@ function AIAssistantPanel({ open, onClose }: { open: boolean; onClose: () => voi
 
 // ─── VISITOR PORTAL PAGE ─────────────────────────────────────────────────────
 function VisitorPortalPage({ onAdminLogin }: { onAdminLogin?: () => void } = {}) {
+  const { signIn, signUp } = useAuth();
   const [authModal, setAuthModal] = useState<"login" | "signup" | null>(null);
   const [loggedIn, setLoggedIn] = useState(false);
+  const [authEmail, setAuthEmail] = useState("");
+  const [authPassword, setAuthPassword] = useState("");
+  const [authError, setAuthError] = useState<string | null>(null);
+  const [authBusy, setAuthBusy] = useState(false);
   const [feedFilter, setFeedFilter] = useState("latest");
   const [searchQuery, setSearchQuery] = useState("");
   const [searchFocused, setSearchFocused] = useState(false);
@@ -1630,18 +1798,36 @@ function VisitorPortalPage({ onAdminLogin }: { onAdminLogin?: () => void } = {})
               )}
               <div>
                 <label className="text-xs font-semibold text-foreground mb-1 block">Email</label>
-                <input placeholder="researcher@institution.edu" className="w-full px-3 py-2.5 text-sm bg-muted border border-border rounded-xl focus:outline-none focus:ring-2 focus:ring-primary/30" />
+                <input value={authEmail} onChange={e => setAuthEmail(e.target.value)} placeholder="researcher@institution.edu" className="w-full px-3 py-2.5 text-sm bg-muted border border-border rounded-xl focus:outline-none focus:ring-2 focus:ring-primary/30" />
               </div>
               <div>
                 <label className="text-xs font-semibold text-foreground mb-1 block">Password</label>
-                <input type="password" placeholder="••••••••" className="w-full px-3 py-2.5 text-sm bg-muted border border-border rounded-xl focus:outline-none focus:ring-2 focus:ring-primary/30" />
+                <input type="password" value={authPassword} onChange={e => setAuthPassword(e.target.value)} placeholder="••••••••" className="w-full px-3 py-2.5 text-sm bg-muted border border-border rounded-xl focus:outline-none focus:ring-2 focus:ring-primary/30" />
               </div>
-              <button onClick={() => {
-                  if (authModal === "login" && onAdminLogin) { onAdminLogin(); return; }
-                  setLoggedIn(true); setAuthModal(null);
+              {authError && (
+                <p className="text-xs text-red-600 bg-red-50 border border-red-200 rounded-xl px-3 py-2">{authError}</p>
+              )}
+              <button onClick={async () => {
+                  setAuthError(null);
+                  setAuthBusy(true);
+                  try {
+                    if (authModal === "signup") {
+                      await signUp(authEmail, authPassword);
+                      setLoggedIn(true);
+                      setAuthModal(null);
+                      return;
+                    }
+                    await signIn(authEmail, authPassword);
+                    if (onAdminLogin) { onAdminLogin(); } else { setLoggedIn(true); setAuthModal(null); }
+                  } catch (e) {
+                    setAuthError(e instanceof Error ? e.message : "Authentication failed");
+                  } finally {
+                    setAuthBusy(false);
+                  }
                 }}
-                className="w-full py-3 bg-gradient-to-r from-primary to-[#2D9C72] text-white font-bold rounded-xl hover:shadow-lg hover:shadow-primary/20 transition-all text-sm">
-                {authModal === "login" ? "Sign In" : "Create Account"}
+                disabled={authBusy}
+                className="w-full py-3 bg-gradient-to-r from-primary to-[#2D9C72] text-white font-bold rounded-xl hover:shadow-lg hover:shadow-primary/20 transition-all text-sm disabled:opacity-60">
+                {authBusy ? "Please wait…" : authModal === "login" ? "Sign In" : "Create Account"}
               </button>
               <div className="relative my-3">
                 <div className="absolute inset-0 flex items-center"><div className="w-full border-t border-border" /></div>
@@ -2436,6 +2622,7 @@ function PlaceholderPage({ title, desc, icon: Icon }: { title: string; desc: str
 
 // ─── APP ROOT ────────────────────────────────────────────────────────────────
 export default function App() {
+  const auth = useAuth();
   const [entry, setEntry] = useState<"welcome" | "guest" | "admin">("welcome");
   const [page, setPage] = useState<Page>("home");
   const [collapsed, setCollapsed] = useState(false);
@@ -2500,7 +2687,7 @@ export default function App() {
       style={{ fontFamily: "'Plus Jakarta Sans', 'Inter', sans-serif" }}>
       <Sidebar page={page} setPage={setPage} collapsed={collapsed} setCollapsed={setCollapsed} dark={dark} />
       <div className="flex-1 flex flex-col overflow-hidden min-w-0">
-        <TopNav dark={dark} setDark={setDark} page={page} onSignOut={() => setEntry("welcome")} />
+        <TopNav dark={dark} setDark={setDark} page={page} onSignOut={() => { void auth.signOut(); setEntry("welcome"); }} />
         <main className="flex-1 overflow-hidden">
           {renderPage()}
         </main>

@@ -17,6 +17,8 @@ env/
 
 # Environment
 .env*
+# Track the frontend env template (no secrets — only public VITE_ vars)
+!.env.example
 node_modules/
 
 # IDE

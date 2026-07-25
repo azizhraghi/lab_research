@@ -1,0 +1,72 @@
+{
+  "yosr yassoura": {
+    "id": "702e6556-572f-47ae-a2e4-d68aadcdb40a",
+    "name": "yosr yassoura",
+    "email": "yosr@lab.com",
+    "orcid": null,
+    "google_scholar_id": null,
+    "publications": [],
+    "h_index": null,
+    "citation_count": null,
+    "topics": [],
+    "last_updated": "2026-07-24T11:09:16.941496Z"
+  },
+  "aaabbbcc": {
+    "id": "c1a79e7b-4305-4f05-aeba-c9220731e9e6",
+    "name": "aaabbbcc",
+    "email": "bbba@lab.com",
+    "orcid": null,
+    "google_scholar_id": null,
+    "publications": [],
+    "h_index": null,
+    "citation_count": null,
+    "topics": [],
+    "last_updated": "2026-07-12T20:35:31.424750Z"
+  },
+  "Smith John": {
+    "id": "7f246423-682e-4201-950a-8e8e45b10045",
+    "name": "Smith John",
+    "email": null,
+    "orcid": null,
+    "google_scholar_id": null,
+    "publications": [],
+    "h_index": null,
+    "citation_count": null,
+    "topics": [],
+    "last_updated": "2026-07-12T20:49:58.541318Z"
+  },
+  "Yann LeCun": {
+    "id": "b4ccb110-f7ee-4b95-9755-8841bf5a83b8",
+    "name": "Yann LeCun",
+    "email": null,
+    "orcid": null,
+    "google_scholar_id": null,
+    "publications": [],
+    "h_index": null,
+    "citation_count": null,
+    "topics": [],
+    "last_updated": "2026-07-17T20:46:47.744108Z"
+  },
+  "Ahmed Ben Ali": {
+    "id": "e13f1fb8-cf75-4ccf-8ae6-11172457de4a",
+    "name": "Ahmed Ben Ali",
+    "email": "ahmed@lab.tn",
+    "orcid": null,
+    "google_scholar_id": null,
+    "publications": [
+      {
+        "id": "arxiv:2301.999",
+        "title": "Irrigation optimization using deep learning",
+        "topic": "irrigation",
+        "source": "arxiv",
+        "discovered_at": "2026-07-21T22:28:29.980095Z"
+      }
+    ],
+    "h_index": null,
+    "citation_count": null,
+    "topics": [
+      "irrigation"
+    ],
+    "last_updated": "2026-07-21T22:28:29.980100Z"
+  }
+}

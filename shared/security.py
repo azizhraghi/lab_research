@@ -29,6 +29,14 @@ async def get_current_user(
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(bearer_scheme),
 ) -> User:
     """Validate a Supabase-issued user token before serving the laboratory API."""
+    if settings.DISABLE_AUTH:
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "DISABLE_AUTH is enabled — authentication is bypassed (development only)."
+        )
+        return User(id="dev", email="dev@local", role="administrator")
+
     if not settings.SUPABASE_URL or not settings.SUPABASE_PUBLISHABLE_KEY:
         raise _authentication_unavailable()
 

@@ -19,6 +19,10 @@ class Settings(BaseSettings):
 
     MISTRAL_API_KEY: str = ""
 
+    # Development only: when true, get_current_user returns a dev user and skips
+    # Supabase token validation. Never enable this in a deployed environment.
+    DISABLE_AUTH: bool = False
+
     SUPABASE_URL: str = ""
     SUPABASE_PUBLISHABLE_KEY: str = ""
     SUPABASE_AUTH_TIMEOUT_SECONDS: float = 5.0
