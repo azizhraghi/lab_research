@@ -1,0 +1,273 @@
+# Integration Plan: Merge Friends' Repositories into Main Monorepo
+
+## Phase 1 — Discovery Summary
+
+### Your Existing Architecture (the "main" monorepo)
+
+| Layer | Location | Tech | Description |
+|-------|----------|------|-------------|
+| **API Gateway** | `api/main.py` | FastAPI (port 8000) | Single entry point, mounts 5 agent routers under `/api/*`. Supabase JWT auth via `shared/security.py`. |
+| **Agents** | `agents/{veille,bibliometrie,digitaltwin,optimisation,simulation}/` | Python, each with `agent.py`, `router.py`, `models.py`, `schemas.py`, `services/` | 5 domain agents, each following a clean pattern: router → agent → service. |
+| **Shared Core** | `shared/` | Python | `config.py` (pydantic-settings), `database.py` (async SQLAlchemy), `event_bus.py` (Redis Streams), `base_agent.py` (ABC), `schemas.py` (Event/Action/Audit), `llm_client.py` (Mistral AI), `security.py` (Supabase auth). |
+| **Frontend** | `frontend/` | Vite + React 19 + Tailwind v4 | Minimal scaffold, Supabase auth, basic pages. |
+| **Infra** | `docker-compose.yml` | Postgres (pgvector), Redis | Infrastructure services only. |
+| **DB Migrations** | `alembic.ini` + `migrations/` | Alembic | Schema migrations for the agents' models. |
+
+---
+
+### Friend 1 — `Research-Lab-Platform` (by garmayosr)
+
+| Aspect | Details |
+|--------|---------|
+| **Tech** | FastAPI (standalone `app/` package), runs on port 8000 |
+| **Agents** | MIS, Orchestrateur, Qualité, Bibliométrie, Veille, CV Generator |
+| **Event Bus** | `InMemoryEventBus` (ABC-based, no external dependencies) |
+| **Base Agent** | Simpler than yours — takes `(name, event_bus)`, uses `on_start()/on_stop()/handle_event()` |
+| **Schemas** | Separate files per domain: `events.py`, `mis.py`, `orchestrateur.py`, `qualite.py`, `bibliometrie.py`, `veille.py` |
+| **Extra** | Standalone `veille-agent/` subfolder with RAG pipeline (fetch, embedder, PubMed fetcher, scheduler) |
+| **Tests** | Unit tests for base_agent, event_bus, bibliometrie, veille, scholar |
+| **Data** | `researchers.json`, sample CVs, `papers.db` (SQLite with scraped papers) |
+
+---
+
+### Friend 2 — `research-lab-agents` (by wassiLabsx)
+
+| Aspect | Details |
+|--------|---------|
+| **Tech** | FastAPI (standalone `app/` package), identical structure to Friend 1 |
+| **Agents** | MIS, Orchestrateur, Qualité (subset of Friend 1's agents) |
+| **Event Bus** | **3 implementations**: `InMemoryEventBus`, `KafkaEventBus`, `RedisEventBus` — selectable via `EVENT_BUS_TYPE` env var |
+| **LLM Client** | `app/services/llm_client.py` — Uses Mistral to evaluate projects (Qualité) and make routing decisions (Orchestrateur) with structured JSON prompting |
+| **State** | Factory pattern in `state.py` — creates the right event bus based on env config |
+| **Infra** | `docker-compose.yml` with Postgres + Kafka + Redis |
+| **Tests** | Scripts for testing Kafka, Redis, Mistral integration |
+
+---
+
+### Friend 3 — `AI Research Laboratory Platform` (Figma frontend)
+
+| Aspect | Details |
+|--------|---------|
+| **Tech** | Vite + React 18 + TailwindCSS v4 + shadcn/ui (Radix) + MUI + Recharts + Motion |
+| **Auth** | `AuthContext.tsx` — full Supabase auth with dev-bypass mode (matches your backend `DISABLE_AUTH`) |
+| **API Layer** | `apiClient.ts` — `apiFetch()` helper targeting `http://localhost:8000`, auto-injects Supabase JWT |
+| **API Hooks** | `veille.ts`, `digitaltwin.ts` — React Query hooks calling your exact API routes (`/api/veille/*`, `/api/twin/*`) |
+| **UI** | Massive `App.tsx` (165KB!) — likely the full Figma export with all pages/components inline |
+| **State** | React Query (`@tanstack/react-query`) for server state |
+
+> [!IMPORTANT]
+> This frontend was **built specifically for your backend API**. The API routes (`/api/veille/articles`, `/api/veille/sources`, `/api/twin/*`) match your existing `api/main.py` routes exactly. This is a drop-in replacement for your current `frontend/`.
+
+---
+
+## Phase 2 — Architecture Mapping & Conflicts
+
+### How the pieces fit together
+
+```mermaid
+graph TB
+    subgraph "Your Monorepo (ROOT)"
+        API["api/main.py<br/>FastAPI Gateway :8000"]
+        AG["agents/<br/>veille, biblio, twin,<br/>sim, optimisation"]
+        SH["shared/<br/>config, database, event_bus,<br/>base_agent, schemas, llm, security"]
+        FE["frontend/<br/>Old React scaffold"]
+        DC["docker-compose.yml<br/>Postgres + Redis"]
+    end
+
+    subgraph "Friend 1: Research-Lab-Platform"
+        F1_AG["app/agents/<br/>MIS, Orchestrateur, Qualité,<br/>Bibliométrie, Veille, CV Gen"]
+        F1_VEILLE["veille-agent/<br/>RAG Pipeline (fetch, embed,<br/>PubMed, scheduler)"]
+        F1_CORE["app/core/<br/>BaseAgent, EventBus (InMemory)"]
+    end
+
+    subgraph "Friend 2: research-lab-agents"
+        F2_AG["app/agents/<br/>MIS, Orchestrateur, Qualité"]
+        F2_LLM["app/services/llm_client.py<br/>Mistral: eval & routing"]
+        F2_CORE["app/core/<br/>EventBus (InMemory + Kafka + Redis)"]
+    end
+
+    subgraph "Friend 3: AI Research Lab Platform"
+        F3_FE["New Figma Frontend<br/>React + shadcn + MUI"]
+        F3_API["API hooks: veille.ts,<br/>digitaltwin.ts → :8000"]
+    end
+
+    F1_AG -->|"merge into"| AG
+    F2_AG -->|"merge into"| AG
+    F2_LLM -->|"merge into"| SH
+    F2_CORE -->|"upgrade"| SH
+    F1_VEILLE -->|"merge into"| AG
+    F3_FE -->|"replace"| FE
+    F3_API -->|"already targets"| API
+
+    style FE fill:#ff6b6b,color:#fff
+    style F3_FE fill:#51cf66,color:#fff
+```
+
+### Conflict Analysis
+
+| # | Conflict | Severity | Resolution |
+|---|----------|----------|------------|
+| 1 | **Two `BaseAgent` designs** — Yours uses `Event/AgentAction/AuditEntry` with permissions & approval queue. Friends' uses simpler `(name, event_bus)` with `on_start/on_stop`. | 🟡 Medium | Keep your richer `BaseAgent`. Adapt friends' agents to extend it. |
+| 2 | **Two `Event` schema designs** — Yours has `EventType` enum. Friends' uses plain `str` type. | 🟡 Medium | Keep yours, add new event types for MIS/Orchestrateur/Qualité. |
+| 3 | **Three `EventBus` implementations** — Yours: Redis Streams. Friend 1: InMemory only. Friend 2: InMemory + Kafka + Redis pub/sub. | 🟢 Low | Merge Friend 2's `KafkaEventBus` + configurable factory into your `shared/event_bus.py`. Keep your Redis Streams as default. |
+| 4 | **Port collision** — All three FastAPI apps default to port 8000. | 🟢 Low | Only your `api/main.py` runs. Friends' `main.py` files won't be used. |
+| 5 | **Docker services overlap** — All three have Postgres on 5432; Friend 2 adds Kafka on 9092. | 🟢 Low | Consolidate into your root `docker-compose.yml`. Add Kafka if needed. |
+| 6 | **Frontend replacement** — Your current `frontend/` is a minimal scaffold. The new Figma frontend is production-ready with auth, API hooks, and full UI. | 🟢 Low | Delete old `frontend/`, replace with new one. |
+| 7 | **LLM Client** — Yours is async. Friend 2's is synchronous with structured prompting for Qualité eval + Orchestrateur routing. | 🟡 Medium | Merge Friend 2's domain-specific LLM functions into your async `llm_client.py`. |
+| 8 | **Veille RAG Pipeline** — Friend 1 has a standalone `veille-agent/` with PubMed fetcher, embedder, and RAG. | 🟢 Low | Merge into `agents/veille/services/`. |
+
+---
+
+## Phase 3 — Integration Strategy
+
+> [!IMPORTANT]
+> **Recommended approach: Consolidate into your existing monorepo structure.** Your architecture is the most mature — clean separation of concerns, proper auth, migrations, and shared core. Friends' work adds new agents and a polished frontend that plug directly into your structure.
+
+### Step-by-Step Implementation Plan
+
+---
+
+#### Step 1: Replace Frontend
+
+- **Delete** `frontend/` (your old minimal scaffold)
+- **Move** `AI Research Laboratory Platform/` → `frontend/`
+- The new frontend already targets `http://localhost:8000` and uses your exact API routes
+- No code changes needed — it's a drop-in replacement
+
+---
+
+#### Step 2: Add New Agents from Friend 1 (`Research-Lab-Platform`)
+
+These agents don't exist in your monorepo yet:
+
+| New Agent | Source | Destination |
+|-----------|--------|-------------|
+| MIS Agent | `Research-Lab-Platform/app/agents/mis_agent.py` | `agents/mis/agent.py` |
+| Orchestrateur Agent | `Research-Lab-Platform/app/agents/orchestrateur_agent.py` | `agents/orchestrateur/agent.py` |
+| Qualité Agent | `Research-Lab-Platform/app/agents/qualite_agent.py` | `agents/qualite/agent.py` |
+| CV Generator | `Research-Lab-Platform/app/agents/cv_generator.py` | `agents/mis/services/cv_generator.py` |
+
+For each new agent, create the standard folder structure: `__init__.py`, `agent.py`, `router.py`, `models.py`, `schemas.py`, `services/`.
+
+- Adapt imports from `app.core.event_bus` → `shared.event_bus`
+- Adapt `BaseAgent` usage to extend your existing `shared.base_agent.BaseAgent`
+- Move relevant schemas from `Research-Lab-Platform/app/schemas/` into each agent's `schemas.py`
+- Move relevant routers from `Research-Lab-Platform/app/routers/` into each agent's `router.py`
+
+---
+
+#### Step 3: Merge Veille RAG Pipeline from Friend 1
+
+- Move `Research-Lab-Platform/veille-agent/fetch.py` → `agents/veille/services/fetch.py`
+- Move `Research-Lab-Platform/veille-agent/fetchpubmed.py` → `agents/veille/services/fetchpubmed.py`
+- Move `Research-Lab-Platform/veille-agent/embedder.py` → `agents/veille/services/embedder.py`
+- Move `Research-Lab-Platform/veille-agent/rag.py` → `agents/veille/services/rag.py`
+- Move `Research-Lab-Platform/veille-agent/scheduler.py` → `agents/veille/services/scheduler.py`
+- Update imports to use `shared.config`, `shared.database`, `shared.llm_client`
+
+---
+
+#### Step 4: Merge Enhanced Bibliométrie Agent from Friend 1
+
+- Your existing `agents/bibliometrie/agent.py` (4.3KB) vs Friend 1's `bibliometrie_agent.py` (16.8KB — **4x larger**)
+- Friend 1's version likely has scholarly integration, richer analysis
+- **Carefully merge** the additional methods into your existing agent, keeping your `BaseAgent` interface
+
+---
+
+#### Step 5: Upgrade Event Bus with Friend 2's Implementations
+
+- Add `KafkaEventBus` class from `research-lab-agents/app/core/event_bus.py` into `shared/event_bus.py`
+- Add the factory function (`creer_event_bus`) from `research-lab-agents/app/state.py`
+- Add `EVENT_BUS_TYPE` config to `shared/config.py` (default: `"redis"`)
+- Add `aiokafka` to `requirements/base.txt`
+- Update `docker-compose.yml` to optionally include Kafka
+
+---
+
+#### Step 6: Merge LLM Functions from Friend 2
+
+- Port `evaluer_projet()` and `decider_routage_ia()` from `research-lab-agents/app/services/llm_client.py` into `shared/llm_client.py`
+- Convert them from synchronous to async (to match your existing pattern)
+- These are used by the Qualité and Orchestrateur agents
+
+---
+
+#### Step 7: Register New Routers in API Gateway
+
+Update [api/main.py](file:///c:/Users/medaz/OneDrive/Bureau/lab_resaerch/api/main.py) to include new routers:
+
+```python
+from agents.mis.router import router as mis_router
+from agents.orchestrateur.router import router as orch_router
+from agents.qualite.router import router as qualite_router
+
+app.include_router(mis_router, prefix="/api/mis", tags=["mis"], dependencies=protected)
+app.include_router(orch_router, prefix="/api/orchestrateur", tags=["orchestrateur"], dependencies=protected)
+app.include_router(qualite_router, prefix="/api/qualite", tags=["qualite"], dependencies=protected)
+```
+
+---
+
+#### Step 8: Consolidate Dependencies
+
+Merge into `requirements/base.txt`:
+- `scholarly>=1.7.11` (already there ✓)
+- `aiokafka>=0.14.0` (new, from Friend 2)
+- `python-dotenv>=1.2.2` (new, for `.env` loading)
+
+---
+
+#### Step 9: Update Docker Compose
+
+Add optional Kafka service to root `docker-compose.yml` (from Friend 2's config).
+
+---
+
+#### Step 10: Cleanup
+
+- **Delete** `Research-Lab-Platform/` folder (all useful code has been moved)
+- **Delete** `research-lab-agents/` folder (all useful code has been merged)
+- Move `Research-Lab-Platform/researchers.json` → `data/researchers.json`
+- Move test files to a `tests/` directory at root
+- Update `shared/schemas.py` to add new `EventType` values for MIS/Orchestrateur/Qualité
+
+---
+
+## Open Questions
+
+> [!IMPORTANT]
+> **Question 1:** Friend 1's `bibliometrie_agent.py` is 4x larger than yours. Should I:
+> - (A) Replace yours entirely with Friend 1's version (and adapt imports)?
+> - (B) Manually merge only the new methods into your existing version?
+
+> [!IMPORTANT]
+> **Question 2:** Friend 2 added Kafka support. Do you actually want to use Kafka, or should we keep Redis Streams as the only event bus and just add the Kafka code as an option?
+
+> [!IMPORTANT]
+> **Question 3:** The new Figma frontend has a massive 165KB `App.tsx` file (likely the entire app in one file from the Figma export). Should I:
+> - (A) Use it as-is for now and refactor later?
+> - (B) Split it into proper page/component files during integration?
+
+---
+
+## Verification Plan
+
+### Automated Tests
+```bash
+# Backend: start the API and check all routes respond
+python -m uvicorn api.main:app --host 0.0.0.0 --port 8000
+# In another terminal:
+curl http://localhost:8000/health
+curl http://localhost:8000/docs  # Check all new agent routes appear
+
+# Frontend: install and dev server
+cd frontend && npm install && npm run dev
+# Verify it loads at http://localhost:5173 and can reach the API
+```
+
+### Manual Verification
+- Confirm all 8 agent routers appear in the FastAPI docs (`/docs`)
+- Confirm the new frontend loads with the Figma design
+- Confirm auth flow works (dev bypass mode)
+- Confirm API calls from frontend reach the backend agents
