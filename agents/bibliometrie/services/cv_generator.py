@@ -1,105 +1,169 @@
-import os
-from datetime import datetime
+# -*- coding: utf-8 -*-
+"""CV Generator – Produces PDF CVs for researchers.
 
-# Simple HTML template for the CV
-CV_TEMPLATE = """
-<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="utf-8">
-    <title>CV - {name}</title>
-    <style>
-        body {{
-            font-family: Arial, sans-serif;
-            color: #333;
-            line-height: 1.6;
-            margin: 20px;
-        }}
-        h1 {{ color: #2c3e50; border-bottom: 2px solid #3498db; padding-bottom: 5px; }}
-        h2 {{ color: #2980b9; margin-top: 20px; }}
-        .header {{ text-align: center; margin-bottom: 30px; }}
-        .contact-info {{ font-size: 0.9em; color: #7f8c8d; }}
-        .publication {{ margin-bottom: 10px; }}
-        .pub-title {{ font-weight: bold; }}
-        .indicators {{ display: flex; justify-content: space-around; background: #ecf0f1; padding: 15px; border-radius: 5px; }}
-        .indicator-box {{ text-align: center; }}
-        .indicator-value {{ font-size: 1.5em; font-weight: bold; color: #2c3e50; }}
-        .indicator-label {{ font-size: 0.8em; color: #7f8c8d; text-transform: uppercase; }}
-    </style>
-</head>
-<body>
-    <div class="header">
-        <h1>{name}</h1>
-        <div class="contact-info">
-            {role} • {department}<br>
-            {email}
-        </div>
-    </div>
-    
-    <h2>Bibliometric Indicators</h2>
-    <div class="indicators">
-        {indicators_html}
-    </div>
-    
-    <h2>Selected Publications</h2>
-    {publications_html}
-</body>
-</html>
+From Friend 1's cv_generator.py, placed in the bibliometrie services directory.
 """
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.units import mm
+from reportlab.lib import colors
+from reportlab.platypus import (
+    SimpleDocTemplate, Paragraph, Spacer, Table,
+    TableStyle, HRFlowable
+)
+from reportlab.lib.styles import ParagraphStyle
 
-async def generate_cv_pdf(researcher_data: dict, output_path: str) -> str:
-    """Generate a PDF CV for a researcher using WeasyPrint (if available)."""
-    
-    # Format indicators
-    indicators_html = ""
-    for ind in researcher_data.get("indicators", []):
-        indicators_html += f"""
-        <div class="indicator-box">
-            <div class="indicator-value">{ind['value']}</div>
-            <div class="indicator-label">{ind['metric_name']}</div>
-        </div>
-        """
-        
-    # Format publications
-    pubs = researcher_data.get("publications", [])
-    pubs.sort(key=lambda x: (x.get("year") or 0), reverse=True)
-    
-    publications_html = ""
-    for pub in pubs[:20]: # Limit to top 20 for CV
-        year_str = f"({pub['year']})" if pub.get('year') else ""
-        journal_str = f" - <i>{pub['journal']}</i>" if pub.get('journal') else ""
-        citations_str = f" [Citations: {pub['citation_count']}]" if pub.get('citation_count', 0) > 0 else ""
-        
-        publications_html += f"""
-        <div class="publication">
-            <span class="pub-title">{pub['title']}</span> {year_str}{journal_str}{citations_str}
-        </div>
-        """
-        
-    if not publications_html:
-        publications_html = "<p>No publications found.</p>"
-        
-    # Render HTML
-    html_content = CV_TEMPLATE.format(
-        name=researcher_data.get("name", "Unknown"),
-        role=researcher_data.get("role", "Researcher"),
-        department=researcher_data.get("department", "Unknown Department"),
-        email=researcher_data.get("email", ""),
-        indicators_html=indicators_html,
-        publications_html=publications_html
+NAVY  = colors.HexColor("#1B2A4A")
+BLUE  = colors.HexColor("#2E5BA8")
+LIGHT = colors.HexColor("#EEF2FA")
+GREY  = colors.HexColor("#5B5B5B")
+
+
+def generate_cv(researcher, output_path: str) -> str:
+    """Generates a PDF CV for a researcher and saves it to output_path."""
+
+    doc = SimpleDocTemplate(
+        output_path,
+        pagesize=A4,
+        topMargin=18*mm, bottomMargin=18*mm,
+        leftMargin=20*mm, rightMargin=20*mm,
+        title=f"CV - {researcher.name}",
     )
-    
-    # Ensure directory exists
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
-    
-    # Try generating PDF
-    try:
-        from weasyprint import HTML
-        HTML(string=html_content).write_pdf(output_path)
-    except (ImportError, OSError) as e:
-        print(f"Warning: WeasyPrint dependencies missing on this OS. Falling back to HTML. Error: {e}")
-        output_path = output_path.replace(".pdf", ".html")
-        with open(output_path, "w", encoding="utf-8") as f:
-            f.write(html_content)
-            
+
+    name_style = ParagraphStyle(
+        "name", fontSize=22, textColor=NAVY,
+        fontName="Helvetica-Bold", spaceAfter=4,
+    )
+    label_style = ParagraphStyle(
+        "label", fontSize=8.5, textColor=BLUE, fontName="Helvetica-Bold",
+    )
+    body_style = ParagraphStyle(
+        "body", fontSize=9.5, leading=14, textColor=colors.HexColor("#222222"),
+    )
+    section_style = ParagraphStyle(
+        "section", fontSize=12, textColor=colors.white,
+        fontName="Helvetica-Bold", leading=16,
+    )
+    sub_style = ParagraphStyle(
+        "sub", fontSize=9, textColor=GREY, fontName="Helvetica-Oblique",
+    )
+
+    story = []
+
+    story.append(Paragraph(researcher.name, name_style))
+    contact_parts = []
+    if researcher.email:
+        contact_parts.append(researcher.email)
+    if researcher.orcid:
+        contact_parts.append(f"ORCID: {researcher.orcid}")
+    if researcher.google_scholar_id:
+        contact_parts.append(f"Scholar ID: {researcher.google_scholar_id}")
+
+    if contact_parts:
+        story.append(Paragraph(" | ".join(contact_parts), sub_style))
+
+    story.append(Spacer(1, 4))
+    story.append(HRFlowable(width="100%", thickness=1.5, color=BLUE))
+    story.append(Spacer(1, 8))
+
+    def section_header(title):
+        tbl = Table(
+            [[Paragraph(title, section_style)]],
+            colWidths=[170*mm]
+        )
+        tbl.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, -1), NAVY),
+            ("LEFTPADDING", (0, 0), (-1, -1), 8),
+            ("TOPPADDING", (0, 0), (-1, -1), 5),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+        ]))
+        return tbl
+
+    story.append(section_header("Bibliometric Metrics"))
+    story.append(Spacer(1, 6))
+
+    metrics_data = [
+        [
+            Paragraph("H-Index", label_style),
+            Paragraph("Total Citations", label_style),
+            Paragraph("Publications", label_style),
+            Paragraph("Research Topics", label_style),
+        ],
+        [
+            Paragraph(str(researcher.h_index) if researcher.h_index else "N/A", body_style),
+            Paragraph(str(researcher.citation_count) if researcher.citation_count else "N/A", body_style),
+            Paragraph(str(len(researcher.publications)), body_style),
+            Paragraph(", ".join(researcher.topics) if researcher.topics else "N/A", body_style),
+        ]
+    ]
+    metrics_tbl = Table(metrics_data, colWidths=[35*mm, 45*mm, 35*mm, 55*mm])
+    metrics_tbl.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), LIGHT),
+        ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#CCCCCC")),
+        ("TOPPADDING", (0, 0), (-1, -1), 6),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+        ("LEFTPADDING", (0, 0), (-1, -1), 8),
+    ]))
+    story.append(metrics_tbl)
+    story.append(Spacer(1, 10))
+
+    story.append(section_header("Publications"))
+    story.append(Spacer(1, 6))
+
+    if not researcher.publications:
+        story.append(Paragraph("No publications recorded yet.", sub_style))
+    else:
+        for i, pub in enumerate(researcher.publications, 1):
+            story.append(Paragraph(f"<b>[{i}]</b> {pub.title}", body_style))
+            story.append(Paragraph(
+                f"Source: {pub.source.upper()}  |  Topic: {pub.topic}  |  ID: {pub.id}",
+                sub_style,
+            ))
+            story.append(Spacer(1, 6))
+
+    story.append(Spacer(1, 6))
+    story.append(HRFlowable(width="100%", thickness=0.6, color=colors.HexColor("#CCCCCC")))
+    story.append(Spacer(1, 4))
+
+    from datetime import datetime, timezone
+    generated_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    story.append(Paragraph(
+        f"CV auto-generated by Bibliometrie Agent  |  {generated_at}",
+        sub_style,
+    ))
+
+    doc.build(story)
+    print(f"CV generated: {output_path}")
     return output_path
+
+
+async def generate_cv_pdf(data: dict, output_path: str) -> str:
+    """Async wrapper for generating a CV PDF from a dict (for the DB-backed router).
+
+    This bridges the original DB-backed endpoint with the new ReportLab generator.
+    """
+    from pydantic import BaseModel
+    from typing import Optional, List
+
+    # Build a minimal researcher-like object from the dict
+    class _MinimalResearcher:
+        def __init__(self, d):
+            self.name = d.get("name", "Unknown")
+            self.email = d.get("email")
+            self.orcid = None
+            self.google_scholar_id = None
+            indicators = {i["metric_name"]: i["value"] for i in d.get("indicators", [])}
+            self.h_index = indicators.get("h_index")
+            self.citation_count = indicators.get("total_citations")
+            self.publications = []
+            self.topics = []
+            for pub in d.get("publications", []):
+                class _Pub:
+                    def __init__(self, p):
+                        self.id = p.get("doi", "")
+                        self.title = p.get("title", "")
+                        self.topic = p.get("journal", "N/A")
+                        self.source = "database"
+                self.publications.append(_Pub(pub))
+
+    researcher = _MinimalResearcher(data)
+    return generate_cv(researcher, output_path)

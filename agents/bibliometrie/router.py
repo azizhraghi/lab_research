@@ -11,7 +11,8 @@ from agents.bibliometrie.schemas import (
     ResearcherCreate, ResearcherResponse, 
     PublicationResponse, CVProfileResponse
 )
-from agents.bibliometrie.services.cv_generator import generate_cv_pdf
+from agents.bibliometrie.services.cv_generator import generate_cv_pdf, generate_cv
+from agents.bibliometrie.agent import bibliometrie_agent
 from fastapi.responses import FileResponse
 
 router = APIRouter()
@@ -22,7 +23,7 @@ async def create_researcher(data: ResearcherCreate, db: AsyncSession = Depends(g
     db_researcher = Researcher(**data.model_dump())
     db.add(db_researcher)
     await db.commit()
-    await db.refresh(db_researcher)
+    await db.refresh(db_researcher, ["indicators", "cv_profile"])
     return db_researcher
 
 @router.get("/researchers", response_model=List[ResearcherResponse])
@@ -91,3 +92,57 @@ async def download_cv_pdf(researcher_id: int, db: AsyncSession = Depends(get_db)
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ── Friend 1 endpoints (JSON-backed researcher profiles) ─────────────
+
+@router.post("/profiles/add")
+async def add_researcher_profile(name: str, email: str = None, orcid: str = None, google_scholar_id: str = None):
+    """Add a researcher to the JSON-backed profile store (Friend 1 feature)."""
+    researcher = bibliometrie_agent.add_researcher(name, email, orcid, google_scholar_id)
+    return researcher.model_dump(mode="json")
+
+
+@router.get("/profiles")
+async def list_researcher_profiles():
+    """List all researchers from JSON-backed store (Friend 1 feature)."""
+    return [r.model_dump(mode="json") for r in bibliometrie_agent.list_researchers()]
+
+
+@router.get("/profiles/{name}")
+async def get_researcher_profile(name: str):
+    """Get a specific researcher profile from JSON store."""
+    researcher = bibliometrie_agent.get_researcher(name)
+    if researcher is None:
+        raise HTTPException(status_code=404, detail=f"Researcher '{name}' not found")
+    return researcher.model_dump(mode="json")
+
+
+@router.post("/profiles/{name}/scholar-sync")
+async def sync_scholar_metrics(name: str):
+    """Fetch Google Scholar metrics for a researcher (Friend 1 feature)."""
+    researcher = bibliometrie_agent.get_researcher(name)
+    if researcher is None:
+        raise HTTPException(status_code=404, detail=f"Researcher '{name}' not found")
+    updated = bibliometrie_agent.fetch_scholar_metrics(researcher)
+    bibliometrie_agent._save_researchers()
+    return updated.model_dump(mode="json")
+
+
+@router.post("/profiles/update-all-metrics")
+async def update_all_scholar_metrics():
+    """Update Scholar metrics for ALL researchers (Friend 1 feature)."""
+    bibliometrie_agent.update_all_metrics()
+    return {"status": "All metrics updated", "count": len(bibliometrie_agent.list_researchers())}
+
+
+@router.post("/profiles/{name}/generate-cv")
+async def generate_researcher_cv(name: str):
+    """Generate a PDF CV for a researcher (Friend 1 feature)."""
+    researcher = bibliometrie_agent.get_researcher(name)
+    if researcher is None:
+        raise HTTPException(status_code=404, detail=f"Researcher '{name}' not found")
+    bibliometrie_agent._regenerate_cv(researcher)
+    filename = researcher.name.replace(" ", "_").lower()
+    return {"status": "CV generated", "path": f"cvs/{filename}_cv.pdf"}
+

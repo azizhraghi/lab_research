@@ -18,7 +18,27 @@ class BaseAgent(ABC):
         self.running = True
         print(f"[{self.name}] Agent started.")
         await self._setup_subscriptions()
-        
+
+    async def _subscribe(self, stream: str, handler) -> None:
+        """Subscribe to a bus stream, robust across all three backends.
+
+        - InMemory / Kafka: ``subscribe`` registers synchronously and returns
+          immediately, so this is a direct await.
+        - Redis Streams: ``subscribe`` blocks forever in a consumer-loop polling
+          ``xreadgroup``. We must not await it on the startup path (it would
+          hang API boot), so it is launched as a background task instead. A bus
+          failure is logged and never prevents the API from starting.
+        """
+        from shared.event_bus import InMemoryEventBus, KafkaEventBus, RedisStreamsEventBus
+        try:
+            if isinstance(event_bus, RedisStreamsEventBus):
+                asyncio.create_task(event_bus.subscribe(stream, handler=handler))
+            else:
+                # InMemory and Kafka both register-and-return.
+                await event_bus.subscribe(stream, handler)
+        except Exception as e:
+            print(f"[{self.name}] Failed to subscribe to '{stream}': {e}")
+
     async def stop(self):
         """Stop the agent."""
         self.running = False

@@ -22,6 +22,7 @@ from agents.bibliometrie import models as biblio_models
 from agents.digitaltwin import models as digitaltwin_models
 from agents.simulation import models as simulation_models
 from agents.optimisation import models as optimisation_models
+from agents.mis import models as mis_models
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.

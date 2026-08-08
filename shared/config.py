@@ -17,6 +17,10 @@ class Settings(BaseSettings):
     REDIS_HOST: str = "localhost"
     REDIS_PORT: int = 6379
 
+    # Event Bus: "redis" (default), "kafka", or "memory"
+    EVENT_BUS_TYPE: str = "redis"
+    KAFKA_BOOTSTRAP_SERVERS: str = "localhost:9092"
+
     MISTRAL_API_KEY: str = ""
 
     # Development only: when true, get_current_user returns a dev user and skips

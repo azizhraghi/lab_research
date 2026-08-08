@@ -1,14 +1,24 @@
 import datetime
 from sqlalchemy import Column, Integer, String, Boolean, DateTime, ForeignKey, Text, Float, JSON
 from sqlalchemy.orm import relationship
+from shared.config import settings
 from shared.database import Base
+
+# pgvector is only available on Postgres. On SQLite (dev) the embedding lives in
+# the JSON column below and similarity is computed in Python; on Postgres (prod)
+# we ALSO keep a real VECTOR column so dedup runs as an indexed SQL query.
+_IS_POSTGRES = settings.database_url.startswith("postgres")
+if _IS_POSTGRES:
+    from pgvector.sqlalchemy import Vector
+    # mistral-embed outputs 1024 dimensions.
+    EMBEDDING_DIM = 1024
 
 class Source(Base):
     __tablename__ = "veille_sources"
-    
+
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String, index=True)
-    type = Column(String)  # rss, api, etc.
+    type = Column(String)  # rss, atom, arxiv, pubmed, api, etc.
     url = Column(String)
     config = Column(JSON, nullable=True)
     active = Column(Boolean, default=True)
@@ -18,7 +28,7 @@ class Source(Base):
 
 class Article(Base):
     __tablename__ = "veille_articles"
-    
+
     id = Column(Integer, primary_key=True, index=True)
     title = Column(String, index=True)
     abstract = Column(Text, nullable=True)
@@ -27,8 +37,13 @@ class Article(Base):
     url = Column(String, nullable=True)
     source_id = Column(Integer, ForeignKey("veille_sources.id"))
     published_at = Column(DateTime, nullable=True)
-    embedding = Column(JSON, nullable=True)  # Stored as JSON instead of Vector
+    # JSON copy of the embedding — always present, works on every dialect.
+    embedding = Column(JSON, nullable=True)
     collected_at = Column(DateTime, default=datetime.datetime.utcnow)
+    # Native vector column — Postgres only. Mirrors `embedding` and is what the
+    # HNSW index and the <=> / <#> operators run against for O(log N) dedup.
+    if _IS_POSTGRES:
+        embedding_vec = Column(Vector(EMBEDDING_DIM), nullable=True)
 
     source = relationship("Source", back_populates="articles")
     tags = relationship("ArticleTag", back_populates="article", cascade="all, delete-orphan")
