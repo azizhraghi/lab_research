@@ -1,6 +1,0 @@
-fastapi>=0.115.0
-uvicorn[standard]>=0.30.6
-pydantic>=2.11
-scholarly==1.7.11
-httpx>=0.27,<0.28
-requests>=2.32

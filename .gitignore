@@ -33,3 +33,20 @@ Thumbs.db
 
 # Byte-compiled
 *.pyc
+
+# Pre-merge source folders. Kept on disk for reference only — the live app is
+# the root-level agents/ + api/ + shared/ + frontend/. Editing these never
+# reaches the running app.
+AI Research Laboratory Platform/
+Research-Lab-Platform/
+research-lab-agents/
+
+# Local run artifacts
+api_boot.log
+nul
+
+# Runtime state written by the app, not source. data/researchers.json holds the
+# legacy JSON-backed profiles (the DB-backed /api/biblio/researchers is the real
+# store); cvs/ holds generated PDFs. Both are recreated on demand.
+data/
+cvs/
