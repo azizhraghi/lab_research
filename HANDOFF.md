@@ -1,7 +1,57 @@
 # Session handoff — "make the platform actually work"
 
-Last updated: 2026-07-30. Keep this file current at the end of every session so a
+Last updated: 2026-08-08. Keep this file current at the end of every session so a
 fresh session can resume without replaying the whole conversation.
+
+## 2026-08-08 — the repo was not storing the project (READ THIS FIRST)
+
+Before this session, **most of the live app had never been committed**. `git log`
+HEAD was still `1679022`, and 114 files were untracked, including all of
+`frontend/src/app/App.tsx` (4,356 lines), every `frontend/src/api/*.ts`,
+`main.tsx`, `AuthContext.tsx`, the whole of `agents/mis/`, `agents/orchestrateur/`
+and `agents/qualite/`, and the ArXiv/PubMed/Scopus fetchers. Meanwhile the files
+git *did* track under `frontend/src/` were the superseded JSX prototype including
+`mockData.js` — nothing the live app imports. A `git clean -fd` or a fresh clone
+would have destroyed months of work.
+
+Fixed in five commits (`b61c3a8` → `355c672`). Verified by cloning HEAD into a
+temp dir: `tsc --noEmit` clean, `npm run build` clean (2317 modules), and
+`from api.main import app` boots all 70 operations using only `.env.example`.
+
+**Rules that follow from this:**
+- Commit at the end of every session. The working tree is no longer allowed to
+  drift from HEAD — that drift *was* the single biggest risk in the project.
+- `data/` and `cvs/` are now gitignored: runtime state the app recreates, not
+  source. `data/researchers.json` held fabricated seed profiles ("Dr. Amina
+  Benali", h-index 12, publications "Attention Is All You Need" / BERT) feeding
+  the legacy `/api/biblio/profiles/*` endpoints. That system is still live and
+  still slated for removal — see Pending #1.
+- The pre-merge folders are now gitignored and kept on disk for reference only.
+
+### ⚠️ Exposed credential — needs rotation
+
+`Research-Lab-Platform/test_scholar.py` contains a hardcoded ScraperAPI key
+(`API_KEY = "ff8101b9..."`) committed in `1679022`, which is **already pushed to
+a public GitHub repo** (`github.com/azizhraghi/lab_research`). Deleting the file
+does not help — the key remains in history at that commit. **It must be rotated
+in the ScraperAPI dashboard.** Nothing else leaked: `.env` has never been
+committed, and a secret scan of all 114 newly-committed files came back clean.
+
+### Corrections to the previous audit
+
+Verified against the actual repo; several claims did not hold:
+- "8 articles with real content in DB" → **2**. 19 of 27 tables are empty: 0
+  projets, 0 personnels, 0 budgets, 0 alertes, 0 rapports, 0 simulation_runs,
+  0 optimisation_runs. So "live-tested every endpoint" cannot be right.
+- **`twin_sensor_readings` = 0.** The FAO-56 water balance, calibration
+  grid-search and irrigation scheduler are all real code that has **never run on
+  real data**, and there is no UI to enter a reading. For a water lab this is the
+  most important gap in the platform — bigger than any cross-agent wiring.
+- "Dead folder cleanup ✅ DONE (git and disk)" → they were staged but never
+  committed, and both are still on disk.
+- Tier A #1 (wire the 5 orphan hooks) was **already done**. Only
+  `useResearcherCvUrl` (a URL helper) and `useRunTwinSimulation` (superseded)
+  are unreferenced, neither of which is a gap.
 
 ## The task
 
@@ -166,27 +216,52 @@ All in `frontend/src/app/App.tsx` unless stated otherwise.
 
 ## Pending — start here next session
 
-1. **MIS sub-resource create hooks are unwired.** `useCreatePersonnel`,
-   `useCreateEquipement` and `useCreateBudget` exist in `frontend/src/api/mis.ts` and are
-   imported nowhere — the same gap that hid the four flows fixed on 2026-07-30. The
-   `Modal`/`Field`/`FormError`/`SubmitButton` primitives make each one a small form.
-2. **`VisitorPortalPage` `searchSuggestions`** — static prompt strings. Harmless (they
-   are placeholder copy, not data) but not backed by anything; consider deriving them
-   from real article tags.
-3. **`WelcomePage` footer copy** — not yet audited for further invented claims.
-4. **Audit the veille router auth comments** before any deployment: several endpoints
-   carry "No auth required for dev testing" comments despite the global
-   `Depends(get_current_user)`.
-5. **Celery decision:** tasks.py files were removed (dead code — no Celery app existed).
-   `celery` stays in requirements. Decide: stand up a real Celery worker for
-   background tasks, or remove `celery` from requirements entirely.
-6. **Scope-honesty pass** (Tier 2): the platform's simulation is a FAO-56 water-balance
-   bucket (not SWAT/HEC-HMS/EPANET); optimisation is a greedy threshold scheduler (not
-   Bayesian/GA). Rename/reframe to match reality, or implement the promised engines.
-7. **Missing data sources** (Tier 2): add ArXiv + PubMed fetchers to veille (only
-   RSS/Atom exists); implement Scopus fetch (column exists, no fetch code).
-8. **pgvector activation** (Tier 2): embeddings are stored as JSON with in-memory cosine
-   loop. For >1000 articles, switch to Postgres + Vector column + `<=>` distance.
+Ordered by value to LRSTE, not by effort. Items 1–3 were previously listed as
+pending and are now **done**: MIS sub-resource create hooks are wired
+(`useCreatePersonnel` 3852, `useCreateEquipement` 3895, `useCreateBudget` 3937),
+`searchSuggestions` is derived from real profiles/departments, ArXiv + PubMed +
+Scopus fetchers exist, and pgvector dedup is implemented.
+
+1. **Sensor-reading ingestion UI — highest value.** `twin_sensor_readings` is
+   empty and there is no way to enter one from the UI, so the entire water half
+   of the platform (FAO-56 balance, calibration, simulation, optimisation) has
+   never run on real LRSTE data. The backend is ready and unused:
+   `POST /api/twin/parcels/{id}/readings`, `/readings/import` (bulk),
+   `/irrigation-events`, `/calibrations/run`, `/recommend`. This converts already-
+   working code into something the lab can actually use.
+2. **No edit/delete outside MIS.** There is no `DELETE /api/veille/sources/{id}`,
+   no `PUT`/`DELETE` on researchers, no `DELETE` on parcels. A wrong RSS feed or a
+   typo'd researcher name is permanent. MIS has full CRUD; nothing else does.
+3. **Remove the legacy JSON profile system.** `/api/biblio/profiles/*` (6
+   endpoints, `agents/bibliometrie/router.py:97-139`) is a parallel researcher
+   store from pre-merge code, backed by the now-gitignored `data/researchers.json`
+   of fabricated profiles. The DB-backed `/api/biblio/researchers` is the real one.
+4. **`@app.on_event("startup")` is deprecated** (`api/main.py:46`) — migrate to a
+   FastAPI lifespan handler.
+5. **InMemory bus dispatches synchronously** inside the publisher's coroutine
+   (`shared/event_bus.py:118`). Bibliometrie's Scholar call + PDF regeneration run
+   *inside the HTTP request that triggered the scrape* — a request-timeout bug, not
+   just a scaling note. Redis publish failures are also swallowed silently
+   (`:56-58`, returns `""`), so `EVENT_BUS_TYPE=redis` without Redis running means
+   agents stop communicating with no error anywhere.
+6. **Audit the veille/biblio router auth comments** before any deployment: two
+   endpoints carry "No auth required for dev testing" despite the global
+   `Depends(get_current_user)`. Confirm `DISABLE_AUTH=false` in prod — it returns
+   an `administrator` stub to every caller.
+7. **Celery decision:** `celery>=5.4.0` is still in `requirements/base.txt` with no
+   Celery app (the dead `tasks.py` files are now deleted). Stand up a real worker
+   or drop the dependency.
+8. **Dependencies are unpinned** (`>=` throughout, no lockfile) — builds are not
+   reproducible across machines.
+9. **Scope-honesty pass:** simulation is a FAO-56 water-balance bucket (not
+   SWAT/HEC-HMS/EPANET); optimisation is a constrained greedy scheduler (not
+   Bayesian/GA). Both are legitimate, useful tools for irrigation scheduling —
+   recommend relabelling the cahier des charges rather than promising engines the
+   lab likely does not need. Relabelling is a day; real engines are months.
+10. **MIS/DigitalTwin/Simulation/Optimisation subscribe to nothing**
+    (`_setup_subscriptions` is `pass`). They are REST-only services, so creating a
+    project does not auto-create a parcel or trigger a run. The "multi-agent" claim
+    holds for 4 of 8 agents.
 
 ## Standing principle
 
