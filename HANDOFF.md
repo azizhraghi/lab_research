@@ -3,6 +3,46 @@
 Last updated: 2026-08-09. Keep this file current at the end of every session so a
 fresh session can resume without replaying the whole conversation.
 
+## 2026-08-09 (later still) — irrigation logging: what was applied, not advised
+
+Pending #1 is **done**. `POST/GET /api/twin/parcels/{id}/irrigation-events` both
+already existed on the backend and were reachable from nowhere; this session
+wired them. No backend change was needed, so the operation count stays at 71.
+
+**Why this came before calibration** (the other half of Pending #1): calibration
+sums `IrrigationEvent` amounts per calendar day into the water balance it fits
+(`services/calibration.py:75-88`). With no events logged, a run does not fail —
+it silently fits parcel parameters against a balance missing every drop of
+applied water. Logging is a *prerequisite* for a trustworthy calibration, not a
+record kept alongside it.
+
+**Correction to the note in the previous entry:** calibration needing ">= 14
+observations" understates the requirement. `calibration.py:66-73` also rejects
+any gap — `len(dates) != expected_days` demands one quality-checked reading for
+**every calendar day** in an unbroken run. Fourteen readings scattered across a
+month fails with "Fill measurement gaps before calibration". Confirmed live: a
+run against 0 readings 400s on the count check first.
+
+Verified live on :8012, all rows deleted afterwards (all four twin tables back
+to 0 except `twin_parcels` at 1):
+- The exact payload the form sends round-trips, timestamp unshifted
+  (`2026-08-09T07:30` → `07:30:00`). Same naive-local convention as readings.
+- Server bounds each return 422 naming the field: `amount_mm` 0 (`gt=0`), 501
+  (`le=500`), `recorded_by` of 1 char (`min_length=2`). The form guards all
+  three client-side, so these are what it prevents rather than what users hit.
+- `notes: null` is accepted; POST to a missing parcel 404s.
+- **GET on a nonexistent parcel returns `[]` with HTTP 200, not 404** —
+  `list_irrigation_events` never checks the parcel exists, unlike the POST. An
+  empty table is therefore not evidence the parcel is real.
+
+UI: a "Log irrigation" button and modal on `IoTPage`, plus an "Irrigation
+History" panel between the readings table and the data-quality flags. The panel
+states plainly that these are the applications calibration sums, and that an
+unlogged irrigation makes a parcel look like it loses water it received.
+`useIrrigationEvents` / `useRecordIrrigation` in `frontend/src/api/digitaltwin.ts`,
+`IrrigationEvent` in `frontend/src/api/types.ts`. Typecheck and build both clean
+(2317 modules).
+
 ## 2026-08-09 (later) — a mistyped reading can finally be retracted
 
 Pending #1 is **done**, and it was the first backend write since the merge:
@@ -306,16 +346,20 @@ All in `frontend/src/app/App.tsx` unless stated otherwise.
 Ordered by value to LRSTE, not by effort. Previously-listed items now **done**:
 MIS sub-resource create hooks, `searchSuggestions`, the ArXiv/PubMed/Scopus
 fetchers, pgvector dedup, the sensor-reading ingestion UI, and (2026-08-09)
-the reading-delete route.
+the reading-delete route plus the irrigation-event log.
 
-1. **The rest of the water workflow is still unreachable from the UI**, though
-   the backend is complete and now has data to work on:
-   `POST /parcels/{id}/irrigation-events` (log what was actually applied — the
-   only way to close the loop between advice and practice) and
-   `/calibrations/run` + `/calibrations/{id}/apply` (fit this parcel's real
-   parameters; needs >= 14 observations, and only rows flagged exactly `ok`
-   with `data_origin` in {field, field_import} are eligible — which the new
-   ingestion UI is careful to produce).
+1. **Calibration is the last unreachable step of the water workflow.**
+   `/parcels/{id}/calibrations/run` + `/calibrations/{profile_id}/apply` fit this
+   parcel's real field capacity and crop coefficient instead of the defaults.
+   The route exists and irrigation logging now feeds it; only the UI is missing.
+   Note the run gate is stricter than a count: `services/calibration.py:66-73`
+   needs one reading for **every calendar day** across the window — flagged
+   exactly `ok`, `data_origin` in {field, field_import}, at least 14 of them, and
+   **no gaps**. The ingestion UI produces eligible rows; a user still has to
+   collect an unbroken run before a run will do anything but 400. Two roles are
+   involved by design — a researcher runs the candidate, a *reviewer or
+   administrator* applies it (`router.py:418-422`), so the UI needs to show a
+   pending candidate's fitted values before anyone commits them.
 2. **Still no delete/edit on anything else.** The reading route above is the only
    non-MIS delete. There is still no `DELETE /api/veille/sources/{id}` and no
    `PUT`/`DELETE` on researchers or parcels — and a parcel delete needs a

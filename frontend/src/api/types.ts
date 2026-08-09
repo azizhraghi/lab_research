@@ -71,6 +71,22 @@ export interface SensorReadingFull extends SensorReading {
   sensor_code: string;
 }
 
+/**
+ * Water actually applied to a parcel. Calibration sums these per day into the
+ * water balance it fits against, so a missing event silently biases the fit.
+ */
+export interface IrrigationEvent {
+  id: number;
+  parcel_id: number;
+  occurred_at: string;
+  amount_mm: number;
+  method: string;
+  source: string;
+  notes?: string | null;
+  recorded_by: string;
+  created_at: string;
+}
+
 export interface Recommendation {
   id: number;
   generated_at: string;

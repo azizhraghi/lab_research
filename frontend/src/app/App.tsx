@@ -45,6 +45,8 @@ import {
   useCreateReading,
   useImportReadings,
   useDeleteReading,
+  useIrrigationEvents,
+  useRecordIrrigation,
   useRecommend,
 } from "../api/digitaltwin";
 import type { SensorReadingDeleteResult } from "../api/digitaltwin";
@@ -2464,6 +2466,117 @@ function ImportReadingsForm({ parcelId, onDone }: { parcelId: number; onDone: ()
   );
 }
 
+// ─── IRRIGATION EVENTS ───────────────────────────────────────────────────────
+// Water actually applied, as opposed to water advised. Calibration sums these
+// per calendar day into the balance it fits (services/calibration.py:75-88), so
+// an unlogged irrigation makes a fitted parcel look like it loses water it never
+// received. Logging is therefore a prerequisite for calibration, not a record.
+
+const IRRIGATION_METHODS = ["drip", "sprinkler", "flood", "furrow", "pivot", "manual"];
+
+function LogIrrigationForm({ parcelId, onDone }: { parcelId: number; onDone: () => void }) {
+  const [occurredAt, setOccurredAt] = useState(localNowForInput());
+  const [amount, setAmount] = useState("");
+  const [method, setMethod] = useState(IRRIGATION_METHODS[0]);
+  const [recordedBy, setRecordedBy] = useState("");
+  const [notes, setNotes] = useState("");
+  const record = useRecordIrrigation();
+
+  const amountNum = Number(amount);
+  const amountEntered = amount.trim() !== "" && Number.isFinite(amountNum);
+  // Server bounds are gt=0 and le=500; both would come back as an opaque 422.
+  const amountTooLow = amountEntered && amountNum <= 0;
+  const amountTooHigh = amountEntered && amountNum > 500;
+  const nameTooShort = recordedBy.trim() !== "" && recordedBy.trim().length < 2;
+  const inFuture = occurredAt !== "" && new Date(occurredAt).getTime() > Date.now();
+  const blocked = amountTooLow || amountTooHigh || nameTooShort;
+
+  const submit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (blocked) return;
+    record.mutate(
+      {
+        parcelId,
+        body: {
+          // Naive local time, posted verbatim — same convention as readings.
+          occurred_at: occurredAt,
+          amount_mm: amountNum,
+          method,
+          notes: notes.trim() === "" ? null : notes.trim(),
+          recorded_by: recordedBy.trim(),
+        },
+      },
+      { onSuccess: onDone },
+    );
+  };
+
+  return (
+    <form onSubmit={submit} className="space-y-3">
+      <Field label="Applied at" required
+        hint="Local time, recorded exactly as entered (no timezone conversion).">
+        <input type="datetime-local" required value={occurredAt}
+          onChange={e => setOccurredAt(e.target.value)} className={inputCls} />
+      </Field>
+      {inFuture && (
+        <p className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded-xl px-3 py-2">
+          This timestamp is in the future. The server accepts it, but an event dated
+          ahead of your readings falls outside any calibration period and will not be
+          counted by a run.
+        </p>
+      )}
+
+      <Field label="Amount applied (mm)" required
+        hint="Depth of water applied to the parcel. Server accepts 0 < value ≤ 500.">
+        <input type="number" step="0.1" min="0.1" max="500" required value={amount}
+          onChange={e => setAmount(e.target.value)} className={inputCls} placeholder="e.g. 25" />
+      </Field>
+      {amountTooLow && (
+        <p className="text-[11px] text-rose-700 bg-rose-50 border border-rose-200 rounded-xl px-3 py-2">
+          The amount must be greater than 0. To correct a mistaken entry, log the real
+          figure instead — there is no zero-amount event.
+        </p>
+      )}
+      {amountTooHigh && (
+        <p className="text-[11px] text-rose-700 bg-rose-50 border border-rose-200 rounded-xl px-3 py-2">
+          {amountNum} mm exceeds the server limit of 500 mm per event. Split a long
+          irrigation into the separate applications that actually occurred.
+        </p>
+      )}
+
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Method" hint="Stored for the record; the balance ignores it.">
+          <select value={method} onChange={e => setMethod(e.target.value)} className={inputCls}>
+            {IRRIGATION_METHODS.map(m => <option key={m} value={m}>{m}</option>)}
+          </select>
+        </Field>
+        <Field label="Recorded by" required hint="Who applied or reported it. 2–100 characters.">
+          <input required value={recordedBy} onChange={e => setRecordedBy(e.target.value)}
+            className={inputCls} placeholder="e.g. A. Benali" />
+        </Field>
+      </div>
+      {nameTooShort && (
+        <p className="text-[11px] text-rose-700 bg-rose-50 border border-rose-200 rounded-xl px-3 py-2">
+          "Recorded by" needs at least 2 characters.
+        </p>
+      )}
+
+      <Field label="Notes" hint="Optional — e.g. which block, or why the amount differed from the advice.">
+        <textarea value={notes} onChange={e => setNotes(e.target.value)} rows={2}
+          className={inputCls} placeholder="optional" />
+      </Field>
+
+      <FormError error={record.error} />
+      <div className="flex items-center gap-2 pt-1">
+        <SubmitButton pending={record.isPending} label="Log irrigation" />
+        <button type="button" onClick={onDone}
+          className="px-4 py-2 text-sm font-semibold rounded-xl border border-border text-muted-foreground hover:bg-muted transition-colors">
+          Cancel
+        </button>
+      </div>
+    </form>
+  );
+}
+
 // ─── IRRIGATION RECOMMENDATION ───────────────────────────────────────────────
 // POST /api/twin/parcels/{id}/recommend takes no body and reads exactly one row:
 // the parcel's most recent reading by recorded_at (agents/digitaltwin/agent.py:60).
@@ -2613,6 +2726,7 @@ function IoTPage() {
   const [importOpen, setImportOpen] = useState(false);
   const [readingToDelete, setReadingToDelete] = useState<SensorReadingFull | null>(null);
   const [deleteResult, setDeleteResult] = useState<SensorReadingDeleteResult | null>(null);
+  const [irrigationOpen, setIrrigationOpen] = useState(false);
   const deleteReading = useDeleteReading();
   const { data: parcels, isLoading: parcelsLoading } = useParcels();
   const effectiveId = selectedId ?? (parcels && parcels.length ? parcels[0].id : null);
@@ -2623,6 +2737,7 @@ function IoTPage() {
   // the recommendation history.
   const READINGS_LIMIT = 90;
   const { data: rawReadings, isLoading: readingsLoading } = useReadings(effectiveId, READINGS_LIMIT);
+  const { data: irrigationEvents } = useIrrigationEvents(effectiveId);
 
   // Readings come back newest-first; charts read left-to-right chronologically.
   const readings = [...(rawReadings ?? [])].sort(
@@ -2705,6 +2820,10 @@ function IoTPage() {
           <button onClick={() => setImportOpen(true)} disabled={!effectiveId}
             className="flex items-center gap-1.5 text-xs font-semibold px-3 py-1.5 rounded-xl border border-border text-foreground hover:bg-muted disabled:opacity-50 transition-colors">
             <Upload size={13} /> Import CSV
+          </button>
+          <button onClick={() => setIrrigationOpen(true)} disabled={!effectiveId}
+            className="flex items-center gap-1.5 text-xs font-semibold px-3 py-1.5 rounded-xl border border-border text-foreground hover:bg-muted disabled:opacity-50 transition-colors">
+            <Droplet size={13} /> Log irrigation
           </button>
           <div className={`flex items-center gap-2 text-xs font-semibold px-3 py-1.5 rounded-xl border ${
             readings.length ? "text-emerald-700 bg-emerald-50 border-emerald-200" : "text-muted-foreground bg-muted border-border"
@@ -2879,6 +2998,56 @@ function IoTPage() {
         )}
       </div>
 
+      {/* Irrigation history — what was actually applied, as opposed to advised.
+          Calibration buckets these per day into the balance it fits, so this list
+          is the audit trail that run leans on. */}
+      <div className="bg-card border border-border rounded-2xl p-5">
+        <div className="flex items-center justify-between gap-3 mb-4">
+          <h3 className="font-bold text-foreground font-jakarta">Irrigation History</h3>
+          <span className="text-[10px] text-muted-foreground">
+            what was applied, not advised · {irrigationEvents?.length ?? 0} event{(irrigationEvents?.length ?? 0) === 1 ? "" : "s"}
+          </span>
+        </div>
+        <p className="text-[11px] text-muted-foreground mb-3">
+          These are the applications the calibration run sums into the water balance
+          it fits. An irrigation you never log makes a parcel look like it loses
+          water it actually received.
+        </p>
+        {!irrigationEvents ? (
+          <p className="text-xs text-muted-foreground">Loading irrigation events…</p>
+        ) : irrigationEvents.length === 0 ? (
+          <p className="text-xs text-muted-foreground">
+            No irrigation logged yet. Log what you apply — it is the other half of
+            the water story this page tracks.
+          </p>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="text-left text-muted-foreground border-b border-border">
+                  <th className="pb-2 pr-3 font-semibold">Applied at</th>
+                  <th className="pb-2 pr-3 font-semibold text-right">Amount (mm)</th>
+                  <th className="pb-2 pr-3 font-semibold">Method</th>
+                  <th className="pb-2 pr-3 font-semibold">Recorded by</th>
+                  <th className="pb-2 font-semibold">Notes</th>
+                </tr>
+              </thead>
+              <tbody>
+                {irrigationEvents.map(ev => (
+                  <tr key={ev.id} className="border-b border-border/50 last:border-0">
+                    <td className="py-2 pr-3 text-foreground whitespace-nowrap">{formatDate(ev.occurred_at)}</td>
+                    <td className="py-2 pr-3 text-right font-semibold text-foreground">{ev.amount_mm} mm</td>
+                    <td className="py-2 pr-3 text-muted-foreground">{ev.method || "—"}</td>
+                    <td className="py-2 pr-3 text-muted-foreground">{ev.recorded_by}</td>
+                    <td className="py-2 text-muted-foreground max-w-64 truncate">{ev.notes || "—"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
       {/* Data-quality flags */}
       <div className="bg-card border border-border rounded-2xl p-5">
         <h3 className="font-bold text-foreground font-jakarta mb-4">Data Quality Flags</h3>
@@ -2922,6 +3091,14 @@ function IoTPage() {
         subtitle={`POST /api/twin/parcels/${effectiveId}/readings/import · requires researcher, reviewer or administrator`}>
         {effectiveId && (
           <ImportReadingsForm parcelId={effectiveId} onDone={() => setImportOpen(false)} />
+        )}
+      </Modal>
+
+      <Modal open={irrigationOpen} onClose={() => setIrrigationOpen(false)}
+        title="Log an irrigation event"
+        subtitle={`POST /api/twin/parcels/${effectiveId}/irrigation-events · requires researcher, reviewer or administrator`}>
+        {effectiveId && (
+          <LogIrrigationForm parcelId={effectiveId} onDone={() => setIrrigationOpen(false)} />
         )}
       </Modal>
 

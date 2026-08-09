@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { apiFetch } from "../lib/apiClient";
 import type {
+  IrrigationEvent,
   OptimizationRun,
   Parcel,
   ParcelDetail,
@@ -207,6 +208,63 @@ export function useDeleteReading() {
       ),
     onSuccess: (_data, { parcelId }) => {
       qc.invalidateQueries({ queryKey: ["twin", "readings", parcelId] });
+      qc.invalidateQueries({ queryKey: ["twin", "parcel", parcelId] });
+    },
+  });
+}
+
+/**
+ * GET /api/twin/parcels/{id}/irrigation-events — newest first by occurred_at,
+ * server limit is 1..365. Unlike the readings routes this one has no role guard.
+ */
+export function useIrrigationEvents(id?: number | null, limit = 60) {
+  return useQuery<IrrigationEvent[]>({
+    queryKey: ["twin", "irrigation", id, limit],
+    queryFn: () =>
+      apiFetch<IrrigationEvent[]>(
+        `/api/twin/parcels/${id}/irrigation-events?limit=${limit}`,
+      ),
+    enabled: Boolean(id),
+  });
+}
+
+/**
+ * Body accepted by POST /api/twin/parcels/{id}/irrigation-events — mirrors
+ * IrrigationEventCreate in agents/digitaltwin/schemas.py. Guarded by
+ * require_roles("researcher", "reviewer", "administrator").
+ *
+ * `occurred_at` must be a NAIVE ISO string ("2026-08-08T06:00"), matching the
+ * readings convention. Calibration buckets events by calendar day and only
+ * counts those inside the reading period it fits, so the date matters.
+ */
+export interface IrrigationEventCreate {
+  occurred_at: string;
+  /** Water applied, in mm. Server enforces gt=0 and le=500 — a 0 is a 422. */
+  amount_mm: number;
+  method?: string;
+  /** Free text; the server default is "field_log". */
+  source?: string;
+  notes?: string | null;
+  /** Server enforces 2..100 characters — an empty string is a 422. */
+  recorded_by: string;
+}
+
+export function useRecordIrrigation() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      parcelId,
+      body,
+    }: {
+      parcelId: number;
+      body: IrrigationEventCreate;
+    }) =>
+      apiFetch<IrrigationEvent>(
+        `/api/twin/parcels/${parcelId}/irrigation-events`,
+        { method: "POST", body: JSON.stringify(body) },
+      ),
+    onSuccess: (_data, { parcelId }) => {
+      qc.invalidateQueries({ queryKey: ["twin", "irrigation", parcelId] });
       qc.invalidateQueries({ queryKey: ["twin", "parcel", parcelId] });
     },
   });
