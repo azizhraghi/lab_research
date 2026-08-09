@@ -1,7 +1,45 @@
 # Session handoff — "make the platform actually work"
 
-Last updated: 2026-08-08. Keep this file current at the end of every session so a
+Last updated: 2026-08-09. Keep this file current at the end of every session so a
 fresh session can resume without replaying the whole conversation.
+
+## 2026-08-09 — the water loop is now reachable (`c142486`)
+
+`twin_sensor_readings` is no longer write-only-in-theory. `IoTPage` can enter a
+reading by hand, bulk-import a CSV, and generate a real irrigation figure. This
+was Pending #1 and it is **done**; frontend only, no backend endpoint changed.
+
+What was verified against a live backend (not inferred):
+- Manual POST round-trips a naive timestamp unshifted (`2026-08-09T06:00` →
+  `2026-08-09T06:00:00`). Send naive local time; do **not** append `Z`.
+- CSV import: `created:3`, then `updated:3` on re-import — upsert key is
+  (parcel, `recorded_at`, `sensor_code`). A missing column 400s and names it. A
+  bad row is rejected individually while the good rows still commit.
+- 60 mm on the 45/120 parcel → **42.0 mm** at score 0.69; 115 mm → **0.0 mm** at
+  0.90. Both reproduce the model by hand.
+- `/recommend` reads **exactly one row** — the newest by `recorded_at`. Importing
+  back-dated history does not change the answer. It 400s (not 404) at zero rows.
+- Verification rows were deleted afterwards; both twin tables are back to 0.
+
+Three traps worth keeping in mind:
+- **`soil_moisture_mm` is root-zone storage in mm, not % VWC**, and the schema
+  accepts any value `>= 0` with no upper bound. A "35" meaning 35 % is stored
+  happily and silently poisons the recommendation. The form prints the parcel's
+  own WP→FC band and warns outside it; the %→mm converter is opt-in, shows its
+  arithmetic, and asks for root-zone depth rather than guessing (the `Parcel`
+  model has no depth column).
+- **`confidence` is not confidence.** It is `0.65 + 0.25 × stress_ratio` — a
+  wetness index bounded to [0.65, 0.90]. A parched parcel scores *lowest*
+  exactly when the advice matters most. The UI renders it as a "reserve score"
+  with the formula visible. Do not relabel it "confidence".
+- **`ParcelDetail.latest_readings` is server-capped at 30.** `IoTPage` used it
+  for every average and chart, so the page was silently truncating. It now uses
+  `GET /readings` with an explicit limit and states the window it covers.
+
+Also fixed: FastAPI returns 422 `detail` as an **array** of `{loc, msg}`, which
+`String()` rendered as `[object Object]`. `formatDetail` in
+`frontend/src/lib/apiClient.ts` now formats it as `field: message` — this fixes
+error display in *every* form in the app, not just the new ones.
 
 ## 2026-08-08 — the repo was not storing the project (READ THIS FIRST)
 
@@ -216,22 +254,26 @@ All in `frontend/src/app/App.tsx` unless stated otherwise.
 
 ## Pending — start here next session
 
-Ordered by value to LRSTE, not by effort. Items 1–3 were previously listed as
-pending and are now **done**: MIS sub-resource create hooks are wired
-(`useCreatePersonnel` 3852, `useCreateEquipement` 3895, `useCreateBudget` 3937),
-`searchSuggestions` is derived from real profiles/departments, ArXiv + PubMed +
-Scopus fetchers exist, and pgvector dedup is implemented.
+Ordered by value to LRSTE, not by effort. Previously-listed items now **done**:
+MIS sub-resource create hooks, `searchSuggestions`, the ArXiv/PubMed/Scopus
+fetchers, pgvector dedup, and (2026-08-09) the sensor-reading ingestion UI.
 
-1. **Sensor-reading ingestion UI — highest value.** `twin_sensor_readings` is
-   empty and there is no way to enter one from the UI, so the entire water half
-   of the platform (FAO-56 balance, calibration, simulation, optimisation) has
-   never run on real LRSTE data. The backend is ready and unused:
-   `POST /api/twin/parcels/{id}/readings`, `/readings/import` (bulk),
-   `/irrigation-events`, `/calibrations/run`, `/recommend`. This converts already-
-   working code into something the lab can actually use.
-2. **No edit/delete outside MIS.** There is no `DELETE /api/veille/sources/{id}`,
-   no `PUT`/`DELETE` on researchers, no `DELETE` on parcels. A wrong RSS feed or a
-   typo'd researcher name is permanent. MIS has full CRUD; nothing else does.
+1. **No delete or edit outside MIS — and this now bites daily.** With readings
+   enterable, a typo'd measurement is permanent and keeps driving the
+   recommendation until a newer row is added. There is no
+   `DELETE /api/twin/parcels/{id}/readings/{rid}` (a full sweep of `@router.*`
+   in `agents/digitaltwin/router.py` confirms zero delete routes), no
+   `DELETE /api/veille/sources/{id}`, and no `PUT`/`DELETE` on researchers or
+   parcels. MIS has full CRUD; nothing else does. A reading-delete route is the
+   smallest fix with the largest daily payoff, and it is a backend change.
+2. **The rest of the water workflow is still unreachable from the UI**, though
+   the backend is complete and now has data to work on:
+   `POST /parcels/{id}/irrigation-events` (log what was actually applied — the
+   only way to close the loop between advice and practice) and
+   `/calibrations/run` + `/calibrations/{id}/apply` (fit this parcel's real
+   parameters; needs >= 14 observations, and only rows flagged exactly `ok`
+   with `data_origin` in {field, field_import} are eligible — which the new
+   ingestion UI is careful to produce).
 3. **Remove the legacy JSON profile system.** `/api/biblio/profiles/*` (6
    endpoints, `agents/bibliometrie/router.py:97-139`) is a parallel researcher
    store from pre-merge code, backed by the now-gitignored `data/researchers.json`
