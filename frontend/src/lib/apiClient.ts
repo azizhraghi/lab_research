@@ -11,6 +11,33 @@ export function setTokenProvider(fn: () => Promise<string | null>): void {
   tokenProvider = fn;
 }
 
+/**
+ * Turn a FastAPI error body into one readable line.
+ *
+ * A 4xx raised via HTTPException carries `detail` as a string, but a 422
+ * validation failure carries an *array* of `{loc, msg, type}` objects. Passing
+ * that array through String() yields "[object Object]", which is what every
+ * form in the app used to show. `loc` starts with the request part ("body",
+ * "query"), so drop the first element to leave the field path.
+ */
+function formatDetail(detail: unknown, fallback: string): string {
+  if (!detail || typeof detail !== "object" || !("detail" in detail)) {
+    return fallback;
+  }
+  const inner = (detail as { detail: unknown }).detail;
+  if (Array.isArray(inner)) {
+    const lines = inner.map((item) => {
+      if (!item || typeof item !== "object") return String(item);
+      const { loc, msg } = item as { loc?: unknown; msg?: unknown };
+      const field = Array.isArray(loc) ? loc.slice(1).join(".") : "";
+      const message = typeof msg === "string" ? msg : JSON.stringify(item);
+      return field ? `${field}: ${message}` : message;
+    });
+    return lines.length ? lines.join("; ") : fallback;
+  }
+  return String(inner);
+}
+
 export class ApiError extends Error {
   status: number;
   detail: unknown;
@@ -51,10 +78,10 @@ export async function apiFetch<T = unknown>(
     } catch {
       detail = await res.text().catch(() => null);
     }
-    const message =
-      detail && typeof detail === "object" && "detail" in detail
-        ? String((detail as { detail: unknown }).detail)
-        : res.statusText || `Request failed (${res.status})`;
+    const message = formatDetail(
+      detail,
+      res.statusText || `Request failed (${res.status})`,
+    );
     throw new ApiError(res.status, message, detail);
   }
 

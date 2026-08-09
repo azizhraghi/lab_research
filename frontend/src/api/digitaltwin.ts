@@ -4,6 +4,8 @@ import type {
   OptimizationRun,
   Parcel,
   ParcelDetail,
+  Recommendation,
+  SensorReadingFull,
   SimulationRun,
   WeatherForecast,
 } from "./types";
@@ -70,6 +72,119 @@ export function useRefreshForecast() {
     onSuccess: (_data, id) => {
       qc.invalidateQueries({ queryKey: ["twin", "forecast", id] });
       qc.invalidateQueries({ queryKey: ["twin", "parcel", id] });
+    },
+  });
+}
+
+/**
+ * Body accepted by POST /api/twin/parcels/{id}/readings — mirrors
+ * SensorReadingCreate in agents/digitaltwin/schemas.py. Guarded by
+ * require_roles("researcher", "reviewer", "administrator").
+ *
+ * `recorded_at` must be a NAIVE ISO string ("2026-08-08T06:00") — an offset or
+ * trailing Z shifts the value and breaks the import upsert's equality check.
+ * `data_origin` is deliberately not exposed: the server default "field" is
+ * correct for manual entry, and the CSV route forces "field_import".
+ */
+export interface SensorReadingCreate {
+  recorded_at: string;
+  /** Root-zone water STORAGE in mm, not volumetric %. ge=0, no upper bound. */
+  soil_moisture_mm: number;
+  rainfall_mm?: number;
+  /** Reference ET0. The crop coefficient is applied server-side. */
+  evapotranspiration_mm?: number;
+  /** Stored on the row but never read by the water-balance model. */
+  temperature_c?: number | null;
+  /** Part of the CSV upsert key (parcel_id, recorded_at, sensor_code). */
+  sensor_code?: string;
+  /** Only the exact string "ok" is eligible for calibration. */
+  quality_flag?: string;
+}
+
+/** Result of POST /api/twin/parcels/{id}/readings/import. */
+export interface SensorReadingImportResult {
+  parcel_id: number;
+  created: number;
+  updated: number;
+  rejected: number;
+  /** Server caps this at the first 20 entries while `rejected` counts them all. */
+  errors: string[];
+}
+
+/**
+ * GET /api/twin/parcels/{id}/readings — newest first, server limit is 1..365.
+ * Prefer this over ParcelDetail.latest_readings, which the server caps at 30.
+ */
+export function useReadings(id?: number | null, limit = 90) {
+  return useQuery<SensorReadingFull[]>({
+    queryKey: ["twin", "readings", id, limit],
+    queryFn: () =>
+      apiFetch<SensorReadingFull[]>(
+        `/api/twin/parcels/${id}/readings?limit=${limit}`,
+      ),
+    enabled: Boolean(id),
+  });
+}
+
+export function useCreateReading() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      parcelId,
+      body,
+    }: {
+      parcelId: number;
+      body: SensorReadingCreate;
+    }) =>
+      apiFetch<SensorReadingFull>(`/api/twin/parcels/${parcelId}/readings`, {
+        method: "POST",
+        body: JSON.stringify(body),
+      }),
+    onSuccess: (_data, { parcelId }) => {
+      qc.invalidateQueries({ queryKey: ["twin", "readings", parcelId] });
+      qc.invalidateQueries({ queryKey: ["twin", "parcel", parcelId] });
+    },
+  });
+}
+
+/**
+ * Bulk CSV import. The multipart field name must be exactly "file".
+ * apiFetch omits Content-Type for FormData so the browser can set the
+ * multipart boundary itself.
+ */
+export function useImportReadings() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ parcelId, file }: { parcelId: number; file: File }) => {
+      const form = new FormData();
+      form.append("file", file);
+      return apiFetch<SensorReadingImportResult>(
+        `/api/twin/parcels/${parcelId}/readings/import`,
+        { method: "POST", body: form },
+      );
+    },
+    onSuccess: (_data, { parcelId }) => {
+      qc.invalidateQueries({ queryKey: ["twin", "readings", parcelId] });
+      qc.invalidateQueries({ queryKey: ["twin", "parcel", parcelId] });
+    },
+  });
+}
+
+/**
+ * POST /api/twin/parcels/{id}/recommend — takes no request body. Uses only the
+ * single most recent reading by recorded_at, so back-dating a reading does not
+ * change the result. Returns 400 (not 404) when the parcel has no readings.
+ */
+export function useRecommend() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (parcelId: number) =>
+      apiFetch<Recommendation & { parcel_id: number }>(
+        `/api/twin/parcels/${parcelId}/recommend`,
+        { method: "POST" },
+      ),
+    onSuccess: (_data, parcelId) => {
+      qc.invalidateQueries({ queryKey: ["twin", "parcel", parcelId] });
     },
   });
 }

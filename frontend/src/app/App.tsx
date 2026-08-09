@@ -16,14 +16,14 @@ import {
   Mail, SquareCode,
   Leaf, Droplet, ThermometerSun, SatelliteDish, BarChart2,
   BrainCircuit, Sprout, Waves, Globe2, Radio, LogIn,
-  Plus, Loader2, CheckCircle2, Trash2
+  Plus, Loader2, CheckCircle2, Trash2, Upload
 } from "lucide-react";
 import {
   AreaChart, Area, BarChart, Bar, LineChart as ReLineChart, Line,
   XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer
 } from "recharts";
 import { useAuth } from "../auth/AuthContext";
-import type { Article, Researcher as ApiResearcher, HistoriqueEvenement, Projet, Personnel, Equipement } from "../api/types";
+import type { Article, Researcher as ApiResearcher, HistoriqueEvenement, Projet, Personnel, Equipement, Parcel, ParcelDetail } from "../api/types";
 import { API_BASE_URL } from "../lib/apiClient";
 import { useArticles, useTriggerScrape, useSources, useCreateSource } from "../api/veille";
 import { useResearchers, useSyncResearcher, useCreateResearcher } from "../api/biblio";
@@ -41,6 +41,10 @@ import {
   useOptimisationRuns,
   useRunOptimisation,
   useCreateParcel,
+  useReadings,
+  useCreateReading,
+  useImportReadings,
+  useRecommend,
 } from "../api/digitaltwin";
 
 // ─── Types ─────────────────────────────────────────────────────────────────
@@ -2138,15 +2142,485 @@ function DigitalTwinsPage() {
   );
 }
 
+// ─── SENSOR READING INGESTION ────────────────────────────────────────────────
+// The digital twin's whole water model runs off twin_sensor_readings, and until
+// now nothing in the UI could write a row to it. These two forms are the intake.
+//
+// The field that matters is soil_moisture_mm: it is root-zone water STORAGE in
+// millimetres, not volumetric percent. The API accepts any value >= 0 with no
+// upper bound (SensorReadingCreate, agents/digitaltwin/schemas.py), so a "35"
+// typed meaning "35 % VWC" is stored happily and quietly poisons the
+// recommendation. Hence the parcel's own wilting-point → field-capacity band is
+// printed next to the input, and the %→mm conversion is offered explicitly
+// rather than guessed.
+
+/** Mirrors CROP_COEFFICIENTS in agents/digitaltwin/services/irrigation.py:14.
+ *  Any crop_type outside this table silently falls back to Kc = 1.0. */
+const CROP_COEFFICIENTS: Record<string, number> = {
+  wheat: 0.95, olive: 0.65, citrus: 0.85, vegetable: 1.05, forage: 1.10,
+};
+
+/** `YYYY-MM-DDTHH:mm` in local time — the exact format <input type="datetime-local">
+ *  uses, and a naive ISO string the backend can parse without a timezone shift. */
+function localNowForInput(): string {
+  const d = new Date();
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+function AddReadingForm({ parcelId, parcel, onDone }: {
+  parcelId: number; parcel?: Parcel; onDone: () => void;
+}) {
+  const [recordedAt, setRecordedAt] = useState(localNowForInput());
+  const [moisture, setMoisture] = useState("");
+  const [rainfall, setRainfall] = useState("0");
+  const [et, setEt] = useState("0");
+  const [temperature, setTemperature] = useState("");
+  const [sensorCode, setSensorCode] = useState("");
+  const [qualityFlag, setQualityFlag] = useState("ok");
+  // Converter — local scratch values, never sent to the API.
+  const [vwc, setVwc] = useState("");
+  const [depth, setDepth] = useState("");
+
+  const create = useCreateReading();
+
+  const vwcNum = Number(vwc);
+  const depthNum = Number(depth);
+  const converted =
+    vwc.trim() !== "" && depth.trim() !== "" &&
+    Number.isFinite(vwcNum) && Number.isFinite(depthNum) && depthNum > 0
+      ? (vwcNum / 100) * depthNum
+      : null;
+
+  const moistureNum = Number(moisture);
+  const bandKnown = Boolean(parcel);
+  const outOfBand =
+    bandKnown && moisture.trim() !== "" && Number.isFinite(moistureNum) &&
+    (moistureNum < parcel!.wilting_point_mm || moistureNum > parcel!.field_capacity_mm);
+  const inFuture = recordedAt !== "" && new Date(recordedAt).getTime() > Date.now();
+
+  const submit = (e: React.FormEvent) => {
+    e.preventDefault();
+    create.mutate(
+      {
+        parcelId,
+        body: {
+          // Posted verbatim: the input is already naive local time. Passing it
+          // through toISOString() would append Z and shift the timestamp.
+          recorded_at: recordedAt,
+          soil_moisture_mm: moistureNum,
+          rainfall_mm: rainfall.trim() === "" ? 0 : Number(rainfall),
+          evapotranspiration_mm: et.trim() === "" ? 0 : Number(et),
+          temperature_c: temperature.trim() === "" ? null : Number(temperature),
+          sensor_code: sensorCode.trim(),
+          quality_flag: qualityFlag,
+        },
+      },
+      { onSuccess: onDone },
+    );
+  };
+
+  return (
+    <form onSubmit={submit} className="space-y-3">
+      <Field label="Measured at" required
+        hint="Local time, recorded exactly as entered (no timezone conversion).">
+        <input type="datetime-local" required value={recordedAt}
+          onChange={e => setRecordedAt(e.target.value)} className={inputCls} />
+      </Field>
+      {inFuture && (
+        <p className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded-xl px-3 py-2">
+          This timestamp is in the future. The server accepts it, but it will become
+          the "most recent" reading and will drive every recommendation until a later
+          one is added.
+        </p>
+      )}
+
+      <Field label="Soil moisture (mm)" required
+        hint={parcel
+          ? `Root-zone water storage. This parcel: wilting point ${parcel.wilting_point_mm} mm → field capacity ${parcel.field_capacity_mm} mm.`
+          : "Root-zone water storage in millimetres, not volumetric percent."}>
+        <input type="number" step="0.1" min="0" required value={moisture}
+          onChange={e => setMoisture(e.target.value)} className={inputCls}
+          placeholder={parcel ? String(parcel.wilting_point_mm) : "e.g. 60"} />
+      </Field>
+      {outOfBand && (
+        <p className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded-xl px-3 py-2">
+          {moistureNum} mm is outside this parcel's {parcel!.wilting_point_mm}–{parcel!.field_capacity_mm} mm
+          range. That is allowed — but it is also what a percentage reading typed into a
+          millimetre field looks like. Use the converter below if you measured %.
+        </p>
+      )}
+
+      <details className="rounded-xl border border-border bg-muted/40 px-3 py-2">
+        <summary className="text-xs font-semibold text-foreground cursor-pointer">
+          I measured volumetric water content (%) instead
+        </summary>
+        <div className="mt-3 space-y-3">
+          <p className="text-[11px] text-muted-foreground">
+            The parcel record has no root-zone depth column, so the depth cannot be
+            filled in for you — enter the depth your probe integrates over. It is used
+            for this conversion only and is not saved anywhere.
+          </p>
+          <div className="grid grid-cols-2 gap-3">
+            <Field label="Volumetric water content (%)">
+              <input type="number" step="0.1" min="0" value={vwc}
+                onChange={e => setVwc(e.target.value)} className={inputCls} placeholder="e.g. 25" />
+            </Field>
+            <Field label="Root-zone depth (mm)">
+              <input type="number" step="1" min="1" value={depth}
+                onChange={e => setDepth(e.target.value)} className={inputCls} placeholder="e.g. 600" />
+            </Field>
+          </div>
+          {converted !== null && (
+            <div className="flex items-center justify-between gap-3 rounded-xl border border-border bg-card px-3 py-2">
+              <span className="text-[11px] text-muted-foreground font-mono">
+                {vwcNum} ÷ 100 × {depthNum} mm = <span className="font-bold text-foreground">{converted.toFixed(1)} mm</span>
+              </span>
+              <button type="button" onClick={() => setMoisture(converted.toFixed(1))}
+                className="text-xs font-semibold px-3 py-1.5 rounded-xl border border-border hover:bg-muted transition-colors shrink-0">
+                Use this value
+              </button>
+            </div>
+          )}
+        </div>
+      </details>
+
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Rainfall (mm)" hint="Since the previous reading.">
+          <input type="number" step="0.1" min="0" value={rainfall}
+            onChange={e => setRainfall(e.target.value)} className={inputCls} />
+        </Field>
+        <Field label="Reference ET₀ (mm)" hint="The crop coefficient is applied server-side.">
+          <input type="number" step="0.1" min="0" value={et}
+            onChange={e => setEt(e.target.value)} className={inputCls} />
+        </Field>
+      </div>
+
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Temperature (°C)" hint="Stored on the record; the water-balance model does not read it.">
+          <input type="number" step="0.1" value={temperature}
+            onChange={e => setTemperature(e.target.value)} className={inputCls} placeholder="optional" />
+        </Field>
+        <Field label="Sensor code" hint="Optional. Part of the CSV import's de-duplication key.">
+          <input value={sensorCode} onChange={e => setSensorCode(e.target.value)}
+            className={inputCls} placeholder="optional" />
+        </Field>
+      </div>
+
+      <Field label="Quality flag" hint="Only the exact value “ok” is eligible for calibration runs.">
+        <select value={qualityFlag} onChange={e => setQualityFlag(e.target.value)} className={inputCls}>
+          <option value="ok">ok</option>
+          <option value="suspect">suspect</option>
+          <option value="calibration">calibration</option>
+        </select>
+      </Field>
+
+      <FormError error={create.error} />
+      <div className="flex items-center gap-2 pt-1">
+        <SubmitButton pending={create.isPending} label="Save reading" />
+        <button type="button" onClick={onDone}
+          className="px-4 py-2 text-sm font-semibold rounded-xl border border-border text-muted-foreground hover:bg-muted transition-colors">
+          Cancel
+        </button>
+      </div>
+    </form>
+  );
+}
+
+const CSV_REQUIRED_COLUMNS = ["recorded_at", "soil_moisture_mm", "rainfall_mm", "evapotranspiration_mm"];
+const CSV_OPTIONAL_COLUMNS = ["temperature_c", "sensor_code", "quality_flag"];
+
+function ImportReadingsForm({ parcelId, onDone }: { parcelId: number; onDone: () => void }) {
+  const [file, setFile] = useState<File | null>(null);
+  const [sizeError, setSizeError] = useState<string | null>(null);
+  const importer = useImportReadings();
+  const result = importer.data;
+
+  const downloadTemplate = () => {
+    const header = [...CSV_REQUIRED_COLUMNS, ...CSV_OPTIONAL_COLUMNS].join(",");
+    const example = [`${localNowForInput()}:00`, "62.5", "0", "4.2", "23.4", "probe-01", "ok"].join(",");
+    const blob = new Blob([`${header}\n${example}\n`], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "sensor-readings-template.csv";
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const pick = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const picked = e.target.files?.[0] ?? null;
+    // Mirrors the server's own guard so a 5 MB+ file fails here, not after upload.
+    if (picked && picked.size > 5 * 1024 * 1024) {
+      setSizeError("CSV import is limited to 5 MB.");
+      setFile(null);
+      return;
+    }
+    setSizeError(null);
+    setFile(picked);
+  };
+
+  const submit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!file) return;
+    importer.mutate({ parcelId, file });
+  };
+
+  if (result) {
+    const hidden = result.rejected - result.errors.length;
+    return (
+      <div className="space-y-3">
+        <div className="grid grid-cols-3 gap-3">
+          {[
+            { label: "Created", value: result.created, cls: "text-emerald-600 bg-emerald-50 border-emerald-200" },
+            { label: "Updated", value: result.updated, cls: "text-blue-600 bg-blue-50 border-blue-200" },
+            { label: "Rejected", value: result.rejected, cls: result.rejected ? "text-red-600 bg-red-50 border-red-200" : "text-muted-foreground bg-muted border-border" },
+          ].map(s => (
+            <div key={s.label} className={`rounded-xl border p-3 text-center ${s.cls}`}>
+              <div className="text-2xl font-bold font-jakarta">{s.value}</div>
+              <div className="text-[10px] font-semibold uppercase tracking-wide">{s.label}</div>
+            </div>
+          ))}
+        </div>
+
+        {result.errors.length > 0 && (
+          <div className="rounded-xl border border-red-200 bg-red-50 p-3 space-y-1 max-h-56 overflow-y-auto">
+            {result.errors.map((err, i) => (
+              <p key={i} className="text-[11px] text-red-700 font-mono break-words">{err}</p>
+            ))}
+            {hidden > 0 && (
+              <p className="text-[11px] text-red-700 font-semibold pt-1">
+                Showing the first {result.errors.length} of {result.rejected} rejected rows —
+                {" "}{hidden} more were rejected but not itemised by the server.
+              </p>
+            )}
+          </div>
+        )}
+
+        {result.created === 0 && result.updated === 0 && (
+          <p className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded-xl px-3 py-2">
+            Nothing was written, so the whole import was rolled back.
+          </p>
+        )}
+
+        <div className="flex items-center gap-2 pt-1">
+          <button type="button" onClick={onDone}
+            className="flex items-center gap-2 px-4 py-2 text-sm font-semibold rounded-xl bg-primary text-primary-foreground shadow-lg shadow-primary/20 hover:opacity-90 transition-all">
+            <CheckCircle2 size={15} /> Done
+          </button>
+          <button type="button" onClick={() => importer.reset()}
+            className="px-4 py-2 text-sm font-semibold rounded-xl border border-border text-muted-foreground hover:bg-muted transition-colors">
+            Import another file
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <form onSubmit={submit} className="space-y-3">
+      <div className="rounded-xl border border-border bg-muted/40 p-3 space-y-2">
+        <p className="text-[11px] text-muted-foreground">
+          <span className="font-semibold text-foreground">Required columns:</span>{" "}
+          <span className="font-mono">{CSV_REQUIRED_COLUMNS.join(", ")}</span>
+        </p>
+        <p className="text-[11px] text-muted-foreground">
+          <span className="font-semibold text-foreground">Optional:</span>{" "}
+          <span className="font-mono">{CSV_OPTIONAL_COLUMNS.join(", ")}</span>
+        </p>
+        <p className="text-[11px] text-muted-foreground">
+          Rows are matched on <span className="font-mono">(parcel, recorded_at, sensor_code)</span>,
+          so re-importing a corrected file updates those rows instead of duplicating them.
+          A <span className="font-mono">data_origin</span> column is ignored — imported rows are
+          always marked <span className="font-mono">field_import</span>.
+        </p>
+        <button type="button" onClick={downloadTemplate}
+          className="flex items-center gap-2 text-xs font-semibold text-primary hover:underline">
+          <Download size={13} /> Download CSV template
+        </button>
+      </div>
+
+      <Field label="CSV file" required hint="UTF-8, up to 5 MB.">
+        <input type="file" accept=".csv,text/csv" required onChange={pick}
+          className="w-full text-xs text-muted-foreground file:mr-3 file:px-3 file:py-2 file:rounded-xl file:border-0 file:text-xs file:font-semibold file:bg-primary file:text-primary-foreground hover:file:opacity-90" />
+      </Field>
+
+      {sizeError && <FormError error={sizeError} />}
+      <FormError error={importer.error} />
+      <div className="flex items-center gap-2 pt-1">
+        <button type="submit" disabled={!file || importer.isPending}
+          className="flex items-center justify-center gap-2 px-4 py-2 text-sm font-semibold rounded-xl bg-primary text-primary-foreground shadow-lg shadow-primary/20 hover:opacity-90 disabled:opacity-50 transition-all">
+          {importer.isPending ? <Loader2 size={15} className="animate-spin" /> : <Upload size={15} />}
+          {importer.isPending ? "Importing…" : "Import readings"}
+        </button>
+        <button type="button" onClick={onDone}
+          className="px-4 py-2 text-sm font-semibold rounded-xl border border-border text-muted-foreground hover:bg-muted transition-colors">
+          Cancel
+        </button>
+      </div>
+    </form>
+  );
+}
+
+// ─── IRRIGATION RECOMMENDATION ───────────────────────────────────────────────
+// POST /api/twin/parcels/{id}/recommend takes no body and reads exactly one row:
+// the parcel's most recent reading by recorded_at (agents/digitaltwin/agent.py:60).
+// Two consequences are stated on screen rather than left to surprise the user —
+// back-dating a reading changes nothing, and `confidence` is not an uncertainty.
+
+function RecommendationPanel({ parcelId, parcel, readingCount, latestReadingAt }: {
+  parcelId: number;
+  parcel?: ParcelDetail;
+  readingCount: number;
+  latestReadingAt?: string;
+}) {
+  const recommend = useRecommend();
+  const result = recommend.data;
+  const history = parcel?.latest_recommendations ?? [];
+
+  const kcKnown = parcel ? parcel.crop_type in CROP_COEFFICIENTS : false;
+  const kc = parcel && kcKnown ? CROP_COEFFICIENTS[parcel.crop_type] : 1.0;
+
+  return (
+    <div className="bg-card border border-border rounded-2xl p-5 space-y-4">
+      <div className="flex items-start justify-between gap-3 flex-wrap">
+        <div>
+          <h3 className="font-bold text-foreground font-jakarta">Irrigation Recommendation</h3>
+          <p className="text-xs text-muted-foreground mt-0.5">
+            Water-balance model over the root zone, after FAO-56.
+            {parcel && ` Kc ${kc.toFixed(2)} for ${parcel.crop_type}.`}
+          </p>
+        </div>
+        <button
+          onClick={() => recommend.mutate(parcelId)}
+          disabled={readingCount === 0 || recommend.isPending}
+          title={readingCount === 0
+            ? "Needs at least one sensor reading — the model has nothing to compute from."
+            : "Recompute from the most recent reading"}
+          className="flex items-center gap-1.5 text-xs font-semibold px-3 py-2 rounded-xl bg-primary text-primary-foreground shadow-lg shadow-primary/20 hover:opacity-90 disabled:opacity-50 transition-all shrink-0"
+        >
+          {recommend.isPending ? <Loader2 size={14} className="animate-spin" /> : <Droplet size={14} />}
+          {recommend.isPending ? "Computing…" : "Generate recommendation"}
+        </button>
+      </div>
+
+      {!kcKnown && parcel && (
+        <p className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded-xl px-3 py-2">
+          Crop type <span className="font-mono">{parcel.crop_type}</span> is not in the
+          model's coefficient table (wheat, olive, citrus, vegetable, forage), so it falls
+          back to Kc = 1.0 — the crop's actual water demand is not being modelled.
+        </p>
+      )}
+
+      {readingCount === 0 && (
+        <p className="text-xs text-muted-foreground">
+          No readings for this parcel, so no recommendation can be produced. Add one above.
+        </p>
+      )}
+
+      <FormError error={recommend.error} />
+
+      {result && (
+        <div className="space-y-3">
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+            <div className="rounded-xl border border-primary/30 bg-primary/5 p-4">
+              <div className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">Apply</div>
+              <div className="text-3xl font-bold text-foreground font-jakarta mt-0.5">
+                {result.recommended_irrigation_mm.toFixed(1)}<span className="text-base font-semibold ml-1">mm</span>
+              </div>
+              {parcel && (
+                <div className="text-[10px] text-muted-foreground mt-1">
+                  ≈ {(result.recommended_irrigation_mm * parcel.area_ha * 10).toFixed(0)} m³ over {parcel.area_ha} ha
+                </div>
+              )}
+            </div>
+            <div className="rounded-xl border border-border bg-muted/40 p-4">
+              <div className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">Water balance</div>
+              <div className={`text-3xl font-bold font-jakarta mt-0.5 ${
+                result.water_balance_mm < 0 ? "text-red-600" : "text-emerald-600"
+              }`}>
+                {result.water_balance_mm > 0 ? "+" : ""}{result.water_balance_mm.toFixed(1)}
+                <span className="text-base font-semibold ml-1">mm</span>
+              </div>
+              <div className="text-[10px] text-muted-foreground mt-1">
+                {result.water_balance_mm < 0 ? "deficit against the target reserve" : "at or above the target reserve"}
+              </div>
+            </div>
+            <div className="rounded-xl border border-border bg-muted/40 p-4">
+              <div className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">Reserve score</div>
+              <div className="text-3xl font-bold text-foreground font-jakarta mt-0.5">
+                {result.confidence.toFixed(2)}
+              </div>
+              <div className="text-[10px] text-muted-foreground mt-1">range 0.65 – 0.90</div>
+            </div>
+          </div>
+
+          <p className="text-xs text-foreground bg-muted/40 border border-border rounded-xl px-3 py-2">
+            {result.rationale}
+          </p>
+
+          <div className="rounded-xl border border-border bg-card px-3 py-2 space-y-1.5">
+            <div className="flex items-start gap-2">
+              <Info size={13} className="text-muted-foreground shrink-0 mt-0.5" />
+              <p className="text-[11px] text-muted-foreground">
+                Computed from the single most recent reading
+                {latestReadingAt ? ` (${formatDate(latestReadingAt)})` : ""}, not from a trend.
+                Adding an older reading will not change this result.
+              </p>
+            </div>
+            <p className="text-[11px] text-muted-foreground pl-[21px]">
+              The reserve score is <span className="font-mono">0.65 + 0.25 × (projected reserve ÷ target reserve)</span> —
+              it tracks how wet the soil is, not how reliable the advice is. A dry parcel scores
+              low precisely when irrigation matters most, so read it as a wetness index.
+            </p>
+            {parcel && (
+              <p className="text-[11px] text-muted-foreground pl-[21px]">
+                Target reserve is field capacity {parcel.field_capacity_mm} mm − wilting point {parcel.wilting_point_mm} mm.
+                Recommendations are capped at 35 % of field capacity per cycle.
+              </p>
+            )}
+          </div>
+        </div>
+      )}
+
+      {history.length > 0 && (
+        <div>
+          <div className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground mb-2">
+            Previous recommendations
+          </div>
+          <div className="space-y-1.5">
+            {[...history].slice(0, 5).map(h => (
+              <div key={h.id} className="flex items-center gap-3 text-[11px] text-muted-foreground border-b border-border/50 last:border-0 pb-1.5 last:pb-0">
+                <span className="whitespace-nowrap">{formatDate(h.generated_at)}</span>
+                <span className="font-semibold text-foreground">{h.recommended_irrigation_mm.toFixed(1)} mm</span>
+                <span>balance {h.water_balance_mm > 0 ? "+" : ""}{h.water_balance_mm.toFixed(1)} mm</span>
+                <span className="ml-auto">score {h.confidence.toFixed(2)}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ─── IOT PAGE ────────────────────────────────────────────────────────────────
 function IoTPage() {
   const [selectedId, setSelectedId] = useState<number | null>(null);
+  const [addOpen, setAddOpen] = useState(false);
+  const [importOpen, setImportOpen] = useState(false);
   const { data: parcels, isLoading: parcelsLoading } = useParcels();
   const effectiveId = selectedId ?? (parcels && parcels.length ? parcels[0].id : null);
-  const { data: parcel, isLoading: parcelLoading } = useParcel(effectiveId);
+  const { data: parcel } = useParcel(effectiveId);
+  // GET /readings rather than ParcelDetail.latest_readings: the embedded list is
+  // capped at 30 rows server-side, which silently truncated every average and
+  // chart on this page. useParcel is still the source for parcel metadata and
+  // the recommendation history.
+  const READINGS_LIMIT = 90;
+  const { data: rawReadings, isLoading: readingsLoading } = useReadings(effectiveId, READINGS_LIMIT);
 
   // Readings come back newest-first; charts read left-to-right chronologically.
-  const readings = [...(parcel?.latest_readings ?? [])].sort(
+  const readings = [...(rawReadings ?? [])].sort(
     (a, b) => new Date(a.recorded_at).getTime() - new Date(b.recorded_at).getTime(),
   );
 
@@ -2159,6 +2633,7 @@ function IoTPage() {
 
   const flagged = readings.filter(r => r.quality_flag !== "ok");
   const latestReading = readings[readings.length - 1];
+  const window = `over ${readings.length} reading${readings.length === 1 ? "" : "s"}`;
 
   const series = readings.map(r => ({
     t: new Date(r.recorded_at).toLocaleString("en-US", { month: "short", day: "numeric", hour: "2-digit" }),
@@ -2169,10 +2644,10 @@ function IoTPage() {
   }));
 
   const metrics = [
-    { label: "Avg Temperature", value: fmt(avg(r => r.temperature_c), "°C"), change: `${readings.length} readings`, icon: Thermometer, color: "text-orange-500", bg: "bg-orange-50" },
+    { label: "Avg Temperature", value: fmt(avg(r => r.temperature_c), "°C"), change: window, icon: Thermometer, color: "text-orange-500", bg: "bg-orange-50" },
     { label: "Avg Soil Moisture", value: fmt(avg(r => r.soil_moisture_mm), " mm"), change: parcel ? `FC ${parcel.field_capacity_mm} mm` : "—", icon: Droplets, color: "text-blue-500", bg: "bg-blue-50" },
-    { label: "Avg Rainfall", value: fmt(avg(r => r.rainfall_mm), " mm"), change: "per reading", icon: Wind, color: "text-cyan-500", bg: "bg-cyan-50" },
-    { label: "Avg ET", value: fmt(avg(r => r.evapotranspiration_mm), " mm"), change: "evapotranspiration", icon: Gauge, color: "text-purple-500", bg: "bg-purple-50" },
+    { label: "Avg Rainfall", value: fmt(avg(r => r.rainfall_mm), " mm"), change: window, icon: Wind, color: "text-cyan-500", bg: "bg-cyan-50" },
+    { label: "Avg ET₀", value: fmt(avg(r => r.evapotranspiration_mm), " mm"), change: "reference ET", icon: Gauge, color: "text-purple-500", bg: "bg-purple-50" },
     { label: "Parcels Monitored", value: String(parcels?.length ?? 0), change: latestReading ? `last ${formatDate(latestReading.recorded_at)}` : "no data", icon: Radio, color: "text-emerald-600", bg: "bg-emerald-50" },
     { label: "Flagged Readings", value: String(flagged.length), change: flagged.length ? "needs review" : "all ok", icon: AlertCircle, color: flagged.length ? "text-red-500" : "text-emerald-600", bg: flagged.length ? "bg-red-50" : "bg-emerald-50" },
   ];
@@ -2191,7 +2666,8 @@ function IoTPage() {
         <div className="bg-card border border-border rounded-2xl p-8 text-center">
           <h2 className="text-xl font-bold text-foreground font-jakarta">IoT Monitoring</h2>
           <p className="text-sm text-muted-foreground mt-2">
-            No parcels configured, so there are no sensor streams. Create one via POST /api/twin/parcels.
+            No parcels configured, so there are no sensor streams. Add a parcel on the
+            Digital Twins page first — readings are always attached to one.
           </p>
         </div>
       </div>
@@ -2207,7 +2683,7 @@ function IoTPage() {
             {parcel ? `${parcel.name} · ${readings.length} reading${readings.length === 1 ? "" : "s"} on record` : "Loading sensor stream…"}
           </p>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 flex-wrap">
           <select
             value={effectiveId ?? ""}
             onChange={e => setSelectedId(Number(e.target.value))}
@@ -2217,6 +2693,14 @@ function IoTPage() {
               <option key={p.id} value={p.id}>{p.name}</option>
             ))}
           </select>
+          <button onClick={() => setAddOpen(true)} disabled={!effectiveId}
+            className="flex items-center gap-1.5 text-xs font-semibold px-3 py-1.5 rounded-xl bg-primary text-primary-foreground shadow-lg shadow-primary/20 hover:opacity-90 disabled:opacity-50 transition-all">
+            <Plus size={13} /> Add reading
+          </button>
+          <button onClick={() => setImportOpen(true)} disabled={!effectiveId}
+            className="flex items-center gap-1.5 text-xs font-semibold px-3 py-1.5 rounded-xl border border-border text-foreground hover:bg-muted disabled:opacity-50 transition-colors">
+            <Upload size={13} /> Import CSV
+          </button>
           <div className={`flex items-center gap-2 text-xs font-semibold px-3 py-1.5 rounded-xl border ${
             readings.length ? "text-emerald-700 bg-emerald-50 border-emerald-200" : "text-muted-foreground bg-muted border-border"
           }`}>
@@ -2237,12 +2721,34 @@ function IoTPage() {
         ))}
       </div>
 
+      {effectiveId && (
+        <RecommendationPanel
+          parcelId={effectiveId}
+          parcel={parcel}
+          readingCount={readings.length}
+          latestReadingAt={latestReading?.recorded_at}
+        />
+      )}
+
       {/* Time series charts */}
-      {parcelLoading ? (
+      {readingsLoading ? (
         <div className="animate-pulse bg-card border border-border rounded-2xl h-56" />
       ) : series.length === 0 ? (
-        <div className="bg-card border border-border rounded-2xl p-8 text-center text-sm text-muted-foreground">
-          No sensor readings recorded for this parcel yet. Ingest them via POST /api/twin/parcels/{effectiveId}/readings.
+        <div className="bg-card border border-border rounded-2xl p-8 text-center">
+          <p className="text-sm text-muted-foreground">
+            No sensor readings recorded for this parcel yet. Nothing on this page — and no
+            irrigation recommendation — can be computed until at least one exists.
+          </p>
+          <div className="flex items-center justify-center gap-2 mt-4">
+            <button onClick={() => setAddOpen(true)}
+              className="flex items-center gap-1.5 text-xs font-semibold px-3 py-2 rounded-xl bg-primary text-primary-foreground shadow-lg shadow-primary/20 hover:opacity-90 transition-all">
+              <Plus size={13} /> Add the first reading
+            </button>
+            <button onClick={() => setImportOpen(true)}
+              className="flex items-center gap-1.5 text-xs font-semibold px-3 py-2 rounded-xl border border-border text-foreground hover:bg-muted transition-colors">
+              <Upload size={13} /> Import a CSV
+            </button>
+          </div>
         </div>
       ) : (
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
@@ -2269,17 +2775,71 @@ function IoTPage() {
                 <YAxis tick={{ fontSize: 9 }} stroke="none" />
                 <Tooltip contentStyle={{ borderRadius: 10, fontSize: 11 }} />
                 <Bar dataKey="rainfall" name="Rainfall (mm)" fill="#0B6E4F" radius={[4, 4, 0, 0]} />
-                <Bar dataKey="et" name="ET (mm)" fill="#F59E0B" radius={[4, 4, 0, 0]} />
+                <Bar dataKey="et" name="ET₀ (mm)" fill="#F59E0B" radius={[4, 4, 0, 0]} />
               </BarChart>
             </ResponsiveContainer>
           </div>
         </div>
       )}
 
+      {/* Recorded readings */}
+      <div className="bg-card border border-border rounded-2xl p-5">
+        <div className="flex items-center justify-between gap-3 mb-4">
+          <h3 className="font-bold text-foreground font-jakarta">Recorded Readings</h3>
+          <span className="text-[10px] text-muted-foreground">
+            newest first · server returns at most {READINGS_LIMIT}
+          </span>
+        </div>
+        {readings.length === 0 ? (
+          <p className="text-xs text-muted-foreground">Nothing recorded for this parcel yet.</p>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="text-left text-muted-foreground border-b border-border">
+                  <th className="pb-2 pr-3 font-semibold">Measured at</th>
+                  <th className="pb-2 pr-3 font-semibold text-right">Moisture (mm)</th>
+                  <th className="pb-2 pr-3 font-semibold text-right">Rain (mm)</th>
+                  <th className="pb-2 pr-3 font-semibold text-right">ET₀ (mm)</th>
+                  <th className="pb-2 pr-3 font-semibold text-right">Temp (°C)</th>
+                  <th className="pb-2 pr-3 font-semibold">Sensor</th>
+                  <th className="pb-2 pr-3 font-semibold">Quality</th>
+                  <th className="pb-2 font-semibold">Origin</th>
+                </tr>
+              </thead>
+              <tbody>
+                {[...readings].reverse().map(r => (
+                  <tr key={r.id} className="border-b border-border/50 last:border-0">
+                    <td className="py-2 pr-3 text-foreground whitespace-nowrap">{formatDate(r.recorded_at)}</td>
+                    <td className="py-2 pr-3 text-right font-semibold text-foreground">{r.soil_moisture_mm}</td>
+                    <td className="py-2 pr-3 text-right text-muted-foreground">{r.rainfall_mm}</td>
+                    <td className="py-2 pr-3 text-right text-muted-foreground">{r.evapotranspiration_mm}</td>
+                    <td className="py-2 pr-3 text-right text-muted-foreground">
+                      {typeof r.temperature_c === "number" ? r.temperature_c : "—"}
+                    </td>
+                    <td className="py-2 pr-3 text-muted-foreground font-mono">{r.sensor_code || "—"}</td>
+                    <td className="py-2 pr-3">
+                      <span className={`px-2 py-0.5 rounded-lg text-[10px] font-semibold ${
+                        r.quality_flag === "ok"
+                          ? "text-emerald-700 bg-emerald-50 border border-emerald-200"
+                          : "text-amber-700 bg-amber-50 border border-amber-200"
+                      }`}>{r.quality_flag}</span>
+                    </td>
+                    <td className="py-2 text-muted-foreground font-mono text-[10px]">{r.data_origin}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
       {/* Data-quality flags */}
       <div className="bg-card border border-border rounded-2xl p-5">
         <h3 className="font-bold text-foreground font-jakarta mb-4">Data Quality Flags</h3>
-        {flagged.length === 0 ? (
+        {readings.length === 0 ? (
+          <p className="text-xs text-muted-foreground">No readings to assess yet.</p>
+        ) : flagged.length === 0 ? (
           <p className="text-xs text-muted-foreground">
             All {readings.length} reading{readings.length === 1 ? "" : "s"} for this parcel are flagged <span className="font-semibold text-emerald-600">ok</span>.
           </p>
@@ -2295,7 +2855,7 @@ function IoTPage() {
                     <span className="text-[10px] text-muted-foreground ml-auto">{formatDate(r.recorded_at)}</span>
                   </div>
                   <p className="text-xs text-muted-foreground">
-                    Soil moisture {r.soil_moisture_mm} mm · rainfall {r.rainfall_mm} mm · ET {r.evapotranspiration_mm} mm
+                    Soil moisture {r.soil_moisture_mm} mm · rainfall {r.rainfall_mm} mm · ET₀ {r.evapotranspiration_mm} mm
                   </p>
                 </div>
               </div>
@@ -2303,6 +2863,22 @@ function IoTPage() {
           </div>
         )}
       </div>
+
+      <Modal open={addOpen} onClose={() => setAddOpen(false)}
+        title="Record a sensor reading"
+        subtitle={`POST /api/twin/parcels/${effectiveId}/readings · requires researcher, reviewer or administrator`}>
+        {effectiveId && (
+          <AddReadingForm parcelId={effectiveId} parcel={parcel} onDone={() => setAddOpen(false)} />
+        )}
+      </Modal>
+
+      <Modal open={importOpen} onClose={() => setImportOpen(false)}
+        title="Import readings from CSV"
+        subtitle={`POST /api/twin/parcels/${effectiveId}/readings/import · requires researcher, reviewer or administrator`}>
+        {effectiveId && (
+          <ImportReadingsForm parcelId={effectiveId} onDone={() => setImportOpen(false)} />
+        )}
+      </Modal>
     </div>
   );
 }

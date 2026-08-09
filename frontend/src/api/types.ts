@@ -61,6 +61,16 @@ export interface SensorReading {
   data_origin: string;
 }
 
+/**
+ * Shape returned by GET /api/twin/parcels/{id}/readings — SensorReadingResponse
+ * in agents/digitaltwin/schemas.py, which adds two fields the inline shape
+ * embedded on ParcelDetail does not carry.
+ */
+export interface SensorReadingFull extends SensorReading {
+  parcel_id: number;
+  sensor_code: string;
+}
+
 export interface Recommendation {
   id: number;
   generated_at: string;
