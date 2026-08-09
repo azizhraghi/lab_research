@@ -3,6 +3,55 @@
 Last updated: 2026-08-09. Keep this file current at the end of every session so a
 fresh session can resume without replaying the whole conversation.
 
+## 2026-08-09 (later) — a mistyped reading can finally be retracted
+
+Pending #1 is **done**, and it was the first backend write since the merge:
+`DELETE /api/twin/parcels/{parcel_id}/readings/{reading_id}`
+(`agents/digitaltwin/router.py`, right after `add_reading`). 71 operations now,
+and it is the **first delete route outside MIS**.
+
+Design decisions worth keeping:
+- **Roles mirror `add_reading`** (`researcher`, `reviewer`, `administrator`), not
+  the narrower admin-only gate on `create_parcel`. Whoever can record an
+  observation must be able to retract it — otherwise a typo is permanent for
+  everyone who can actually enter data.
+- **The lookup is scoped to the parcel in the path.** `db.get()` alone would let
+  `DELETE /parcels/1/readings/{id-owned-by-parcel-2}` destroy another parcel's
+  observation; the handler compares `reading.parcel_id` and 404s on mismatch.
+- **The response is `SensorReadingDeleteResponse`, not a bare message** — it
+  returns `was_latest` and `remaining` because `/recommend` reads exactly one
+  row (newest by `recorded_at`). The UI needs to know whether it just changed
+  the next recommendation.
+
+Verified live against a booted API on :8011 (`DISABLE_AUTH=true`), then all
+verification rows deleted — `twin_sensor_readings` and `twin_recommendations`
+are back to 0, `twin_parcels` still 1:
+- Non-latest delete → `was_latest:false, remaining:2`. Latest → `was_latest:true`.
+- Re-deleting the same id → 404. Wrong parcel (`/parcels/99/readings/1`) → 404
+  **and the row survived** (confirmed by re-listing).
+- **The retraction actually moves the model**: a typo'd `35` (35 % read as
+  35 mm) on top of a real `80` pushed the balance from `-44.27` to `-79.28`;
+  deleting the typo restored `-44.27` exactly.
+- Deleting the final row → `remaining:0`, and `/recommend` then 400s
+  ("No sensor readings for parcel 1") as documented.
+
+Two traps found while testing, both now surfaced in the UI:
+- **Deleting a reading does not revise recommendations already stored.** There is
+  no FK from `IrrigationRecommendation` to the reading it used, so the two
+  `-79.28` rows from the typo outlived it. The confirm dialog warns when the
+  target is the newest row, and the success banner prompts a re-run.
+- **SQLite reuses freed ids** (`max(id)+1`), so a new reading took id 2 after
+  ids 2 and 3 were deleted. Do not assume ids keep climbing when hand-testing;
+  re-list before targeting an id. The CSV upsert key is still
+  (parcel, `recorded_at`, `sensor_code`), so re-importing a file recreates a
+  deleted row — correct upsert behaviour, but surprising after a cleanup.
+
+Frontend: `useDeleteReading` + `SensorReadingDeleteResult` in
+`frontend/src/api/digitaltwin.ts`; a per-row trash button in the IoTPage
+"Recorded Readings" table (new "Correct" column) reusing the existing `Modal` /
+`FormError` / `Trash2` pattern from the MIS project delete. `npm run typecheck`
+clean, `npm run build` clean (2317 modules).
+
 ## 2026-08-09 — the water loop is now reachable (`c142486`)
 
 `twin_sensor_readings` is no longer write-only-in-theory. `IoTPage` can enter a
@@ -256,17 +305,10 @@ All in `frontend/src/app/App.tsx` unless stated otherwise.
 
 Ordered by value to LRSTE, not by effort. Previously-listed items now **done**:
 MIS sub-resource create hooks, `searchSuggestions`, the ArXiv/PubMed/Scopus
-fetchers, pgvector dedup, and (2026-08-09) the sensor-reading ingestion UI.
+fetchers, pgvector dedup, the sensor-reading ingestion UI, and (2026-08-09)
+the reading-delete route.
 
-1. **No delete or edit outside MIS — and this now bites daily.** With readings
-   enterable, a typo'd measurement is permanent and keeps driving the
-   recommendation until a newer row is added. There is no
-   `DELETE /api/twin/parcels/{id}/readings/{rid}` (a full sweep of `@router.*`
-   in `agents/digitaltwin/router.py` confirms zero delete routes), no
-   `DELETE /api/veille/sources/{id}`, and no `PUT`/`DELETE` on researchers or
-   parcels. MIS has full CRUD; nothing else does. A reading-delete route is the
-   smallest fix with the largest daily payoff, and it is a backend change.
-2. **The rest of the water workflow is still unreachable from the UI**, though
+1. **The rest of the water workflow is still unreachable from the UI**, though
    the backend is complete and now has data to work on:
    `POST /parcels/{id}/irrigation-events` (log what was actually applied — the
    only way to close the loop between advice and practice) and
@@ -274,6 +316,14 @@ fetchers, pgvector dedup, and (2026-08-09) the sensor-reading ingestion UI.
    parameters; needs >= 14 observations, and only rows flagged exactly `ok`
    with `data_origin` in {field, field_import} are eligible — which the new
    ingestion UI is careful to produce).
+2. **Still no delete/edit on anything else.** The reading route above is the only
+   non-MIS delete. There is still no `DELETE /api/veille/sources/{id}` and no
+   `PUT`/`DELETE` on researchers or parcels — and a parcel delete needs a
+   decision on its children (readings, forecasts, irrigation events,
+   calibrations, recommendations all FK to `twin_parcels` with no cascade
+   configured, so a naive delete will fail or orphan rows). Follow the pattern
+   set by the reading route: scope child lookups to the parent, and return what
+   the caller needs to know rather than a bare message.
 3. **Remove the legacy JSON profile system.** `/api/biblio/profiles/*` (6
    endpoints, `agents/bibliometrie/router.py:97-139`) is a parallel researcher
    store from pre-merge code, backed by the now-gitignored `data/researchers.json`

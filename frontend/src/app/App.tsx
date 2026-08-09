@@ -23,7 +23,7 @@ import {
   XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer
 } from "recharts";
 import { useAuth } from "../auth/AuthContext";
-import type { Article, Researcher as ApiResearcher, HistoriqueEvenement, Projet, Personnel, Equipement, Parcel, ParcelDetail } from "../api/types";
+import type { Article, Researcher as ApiResearcher, HistoriqueEvenement, Projet, Personnel, Equipement, Parcel, ParcelDetail, SensorReadingFull } from "../api/types";
 import { API_BASE_URL } from "../lib/apiClient";
 import { useArticles, useTriggerScrape, useSources, useCreateSource } from "../api/veille";
 import { useResearchers, useSyncResearcher, useCreateResearcher } from "../api/biblio";
@@ -44,8 +44,10 @@ import {
   useReadings,
   useCreateReading,
   useImportReadings,
+  useDeleteReading,
   useRecommend,
 } from "../api/digitaltwin";
+import type { SensorReadingDeleteResult } from "../api/digitaltwin";
 
 // ─── Types ─────────────────────────────────────────────────────────────────
 type Page =
@@ -2609,6 +2611,9 @@ function IoTPage() {
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [addOpen, setAddOpen] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
+  const [readingToDelete, setReadingToDelete] = useState<SensorReadingFull | null>(null);
+  const [deleteResult, setDeleteResult] = useState<SensorReadingDeleteResult | null>(null);
+  const deleteReading = useDeleteReading();
   const { data: parcels, isLoading: parcelsLoading } = useParcels();
   const effectiveId = selectedId ?? (parcels && parcels.length ? parcels[0].id : null);
   const { data: parcel } = useParcel(effectiveId);
@@ -2790,6 +2795,34 @@ function IoTPage() {
             newest first · server returns at most {READINGS_LIMIT}
           </span>
         </div>
+        {deleteResult && (
+          <div className="mb-4 flex items-start gap-2 rounded-xl border border-emerald-200 bg-emerald-50 p-3 text-xs text-emerald-800">
+            <CheckCircle2 size={14} className="mt-0.5 shrink-0" />
+            <div className="flex-1">
+              <div>
+                Reading #{deleteResult.deleted_id} ({formatDate(deleteResult.recorded_at)}) deleted.{" "}
+                {deleteResult.remaining} reading{deleteResult.remaining === 1 ? "" : "s"} left on this parcel.
+              </div>
+              {deleteResult.was_latest && deleteResult.remaining > 0 && (
+                <div className="mt-1 font-semibold">
+                  It was the newest row, so re-run the recommendation above to refresh the irrigation figure.
+                </div>
+              )}
+              {deleteResult.remaining === 0 && (
+                <div className="mt-1 font-semibold">
+                  No readings remain — the recommendation cannot be computed until you add one.
+                </div>
+              )}
+            </div>
+            <button
+              type="button"
+              onClick={() => setDeleteResult(null)}
+              className="text-emerald-700 hover:text-emerald-900 font-semibold"
+            >
+              Dismiss
+            </button>
+          </div>
+        )}
         {readings.length === 0 ? (
           <p className="text-xs text-muted-foreground">Nothing recorded for this parcel yet.</p>
         ) : (
@@ -2804,7 +2837,8 @@ function IoTPage() {
                   <th className="pb-2 pr-3 font-semibold text-right">Temp (°C)</th>
                   <th className="pb-2 pr-3 font-semibold">Sensor</th>
                   <th className="pb-2 pr-3 font-semibold">Quality</th>
-                  <th className="pb-2 font-semibold">Origin</th>
+                  <th className="pb-2 pr-3 font-semibold">Origin</th>
+                  <th className="pb-2 font-semibold text-right">Correct</th>
                 </tr>
               </thead>
               <tbody>
@@ -2825,7 +2859,18 @@ function IoTPage() {
                           : "text-amber-700 bg-amber-50 border border-amber-200"
                       }`}>{r.quality_flag}</span>
                     </td>
-                    <td className="py-2 text-muted-foreground font-mono text-[10px]">{r.data_origin}</td>
+                    <td className="py-2 pr-3 text-muted-foreground font-mono text-[10px]">{r.data_origin}</td>
+                    <td className="py-2 text-right">
+                      <button
+                        type="button"
+                        onClick={() => { setDeleteResult(null); deleteReading.reset(); setReadingToDelete(r); }}
+                        title={`Delete reading #${r.id} — the only way to retract a mistyped measurement`}
+                        aria-label={`Delete reading recorded at ${formatDate(r.recorded_at)}`}
+                        className="p-1.5 rounded-lg text-muted-foreground hover:text-red-600 hover:bg-red-50 transition-colors"
+                      >
+                        <Trash2 size={13} />
+                      </button>
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -2877,6 +2922,64 @@ function IoTPage() {
         subtitle={`POST /api/twin/parcels/${effectiveId}/readings/import · requires researcher, reviewer or administrator`}>
         {effectiveId && (
           <ImportReadingsForm parcelId={effectiveId} onDone={() => setImportOpen(false)} />
+        )}
+      </Modal>
+
+      {/* Reading deletion. The recommendation model reads exactly one row — the
+          newest by recorded_at — so a mistyped measurement keeps driving the
+          irrigation figure until it is removed or superseded. Deleting does NOT
+          revise recommendations already stored (there is no FK from a
+          recommendation to the reading it used), hence the re-run prompt. */}
+      <Modal
+        open={readingToDelete !== null}
+        onClose={() => !deleteReading.isPending && setReadingToDelete(null)}
+        title="Delete sensor reading"
+        subtitle={`DELETE /api/twin/parcels/${effectiveId}/readings/${readingToDelete?.id} · requires researcher, reviewer or administrator`}
+      >
+        {readingToDelete && (
+          <div className="space-y-4">
+            <p className="text-sm text-muted-foreground">
+              Permanently remove the reading measured{" "}
+              <span className="font-semibold text-foreground">{formatDate(readingToDelete.recorded_at)}</span>? This cannot be undone.
+            </p>
+            <div className="rounded-xl border border-border bg-muted/40 p-3 text-xs text-muted-foreground space-y-0.5">
+              <div>Soil moisture <span className="font-semibold text-foreground">{readingToDelete.soil_moisture_mm} mm</span> · rainfall {readingToDelete.rainfall_mm} mm · ET₀ {readingToDelete.evapotranspiration_mm} mm</div>
+              <div>Sensor <span className="font-mono">{readingToDelete.sensor_code || "—"}</span> · quality <span className="font-mono">{readingToDelete.quality_flag}</span> · origin <span className="font-mono">{readingToDelete.data_origin}</span></div>
+            </div>
+            {latestReading?.id === readingToDelete.id && (
+              <div className="flex items-start gap-2 rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs text-amber-800">
+                <AlertCircle size={14} className="mt-0.5 shrink-0" />
+                <span>
+                  This is the newest reading — the only one the recommendation uses. Deleting it
+                  makes the next recommendation fall back to the previous measurement, and any
+                  recommendation already generated keeps the old figure until you re-run it.
+                </span>
+              </div>
+            )}
+            <FormError error={deleteReading.error} />
+            <div className="flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setReadingToDelete(null)}
+                disabled={deleteReading.isPending}
+                className="px-4 py-2 text-sm font-medium rounded-xl text-muted-foreground hover:bg-secondary hover:text-foreground disabled:opacity-50 transition-all"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => effectiveId && deleteReading.mutate(
+                  { parcelId: effectiveId, readingId: readingToDelete.id },
+                  { onSuccess: (res) => { setDeleteResult(res); setReadingToDelete(null); } },
+                )}
+                disabled={deleteReading.isPending}
+                className="flex items-center gap-2 px-4 py-2 text-sm font-semibold rounded-xl bg-red-600 text-white hover:bg-red-700 disabled:opacity-50 transition-colors"
+              >
+                {deleteReading.isPending ? <Loader2 size={15} className="animate-spin" /> : <Trash2 size={15} />}
+                {deleteReading.isPending ? "Deleting…" : "Delete reading"}
+              </button>
+            </div>
+          </div>
         )}
       </Modal>
     </div>

@@ -199,3 +199,20 @@ class SensorReadingImportResponse(BaseModel):
     updated: int
     rejected: int
     errors: List[str] = []
+
+
+class SensorReadingDeleteResponse(BaseModel):
+    """Outcome of removing one sensor reading.
+
+    `was_latest` matters: /recommend reads only the newest row by recorded_at, so
+    deleting that row changes the next recommendation while any already-stored
+    IrrigationRecommendation keeps the old figure (there is no foreign key from a
+    recommendation back to the reading it used). `remaining` is 0 when the parcel
+    can no longer produce a recommendation at all.
+    """
+
+    parcel_id: int
+    deleted_id: int
+    recorded_at: datetime
+    was_latest: bool
+    remaining: int

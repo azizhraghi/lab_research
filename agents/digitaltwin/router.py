@@ -3,7 +3,7 @@ import io
 from typing import List
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from shared.database import get_db
@@ -29,6 +29,7 @@ from agents.digitaltwin.schemas import (
     ParcelResponse,
     RecommendationInline,
     SensorReadingCreate,
+    SensorReadingDeleteResponse,
     SensorReadingInline,
     SensorReadingImportResponse,
     SensorReadingResponse,
@@ -182,6 +183,57 @@ async def add_reading(
     await db.refresh(reading)
     return reading
 
+
+@router.delete(
+    "/parcels/{parcel_id}/readings/{reading_id}",
+    response_model=SensorReadingDeleteResponse,
+    dependencies=[Depends(require_roles("researcher", "reviewer", "administrator"))],
+)
+async def delete_reading(
+    parcel_id: int,
+    reading_id: int,
+    db: AsyncSession = Depends(get_db),
+):
+    """Remove one sensor reading — the correction path for a mistyped measurement.
+
+    Guarded with the same roles as adding a reading: whoever can record an
+    observation must be able to retract it, because a wrong root-zone value keeps
+    driving /recommend until a newer row replaces it.
+    """
+    reading = await db.get(SensorReading, reading_id)
+    # Scope the lookup to the parcel in the path so
+    # DELETE /parcels/1/readings/{id-belonging-to-2} cannot delete another
+    # parcel's observation.
+    if not reading or reading.parcel_id != parcel_id:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Reading {reading_id} not found on parcel {parcel_id}",
+        )
+
+    latest_result = await db.execute(
+        select(SensorReading.id)
+        .where(SensorReading.parcel_id == parcel_id)
+        .order_by(SensorReading.recorded_at.desc())
+        .limit(1)
+    )
+    was_latest = latest_result.scalar_one_or_none() == reading_id
+    recorded_at = reading.recorded_at
+
+    await db.delete(reading)
+    await db.commit()
+
+    remaining_result = await db.execute(
+        select(func.count())
+        .select_from(SensorReading)
+        .where(SensorReading.parcel_id == parcel_id)
+    )
+    return SensorReadingDeleteResponse(
+        parcel_id=parcel_id,
+        deleted_id=reading_id,
+        recorded_at=recorded_at,
+        was_latest=was_latest,
+        remaining=remaining_result.scalar_one(),
+    )
 
 
 @router.post(

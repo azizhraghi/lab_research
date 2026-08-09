@@ -170,6 +170,48 @@ export function useImportReadings() {
   });
 }
 
+/** Result of DELETE /api/twin/parcels/{id}/readings/{readingId}. */
+export interface SensorReadingDeleteResult {
+  parcel_id: number;
+  deleted_id: number;
+  recorded_at: string;
+  /**
+   * True when the removed row was the newest by recorded_at — i.e. the one
+   * /recommend was reading. Any recommendation already stored keeps the old
+   * figure, so the UI should prompt for a re-run.
+   */
+  was_latest: boolean;
+  /** Readings left on the parcel; 0 means /recommend will now 400. */
+  remaining: number;
+}
+
+/**
+ * DELETE /api/twin/parcels/{id}/readings/{readingId} — the correction path for a
+ * mistyped measurement. Scoped to the parcel server-side, so a reading id from
+ * another parcel 404s rather than deleting across parcels. Guarded by
+ * require_roles("researcher", "reviewer", "administrator").
+ */
+export function useDeleteReading() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      parcelId,
+      readingId,
+    }: {
+      parcelId: number;
+      readingId: number;
+    }) =>
+      apiFetch<SensorReadingDeleteResult>(
+        `/api/twin/parcels/${parcelId}/readings/${readingId}`,
+        { method: "DELETE" },
+      ),
+    onSuccess: (_data, { parcelId }) => {
+      qc.invalidateQueries({ queryKey: ["twin", "readings", parcelId] });
+      qc.invalidateQueries({ queryKey: ["twin", "parcel", parcelId] });
+    },
+  });
+}
+
 /**
  * POST /api/twin/parcels/{id}/recommend — takes no request body. Uses only the
  * single most recent reading by recorded_at, so back-dating a reading does not
