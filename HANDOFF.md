@@ -74,8 +74,9 @@ removed — DB back to 1 researcher / 0 publications / 1 parcel:
 
 **`twin_parcels` has six child tables, not the five this file previously
 claimed** — `twin_simulations` (`SimulationScenario`) was missing from the
-Pending #1 note. `delete_parcel` counts all six, most-precious-first, and
-refuses rather than cascading so field measurements cannot be lost by mistake.
+earlier delete-route note. `delete_parcel` counts all six, most-precious-first,
+and refuses rather than cascading so field measurements cannot be lost by
+mistake.
 
 **Two traps for the next session:**
 
@@ -87,10 +88,19 @@ refuses rather than cascading so field measurements cannot be lost by mistake.
   share an iD (correct — an iD identifies one person). Testing the co-author
   path needs two *distinct* iDs sharing a DOI, not one iD twice.
 
-Git identity was `medaz <medaz@example.com>`; the user's real identity is
-`azizhraghi <azizhraghi@gmail.com>`. Set repo-locally (`git config user.*`).
-The four commits before this session are authored `medaz` and are **unpushed** —
-see Pending #1 if the user wants that history reattributed.
+Git identity was `medaz <medaz@example.com>` repo-locally, overriding the
+global `azizhraghi <azizhraghi@gmail.com>`. Since `example.com` is the
+reserved placeholder domain, GitHub could not link those commits to any
+account — they showed up as an unknown contributor. Fixed: repo-local
+`user.name`/`user.email` now match the real identity, and the six unpushed
+commits were reattributed via `git rebase origin/main --exec 'git commit
+--amend --no-edit --author=...'` before pushing (fast-forward, no force).
+
+**Still authored `medaz` and left alone: everything at or below `1507908`**,
+which is already on the remote. Rewriting pushed history needs a force-push,
+so that was deliberately not done. `git log origin/main --format='%an'`
+currently shows 6 `azizhraghi`, 8 `aziz`, 7 `medaz` — all the same person,
+but only the first two link to the GitHub account.
 
 ## 2026-08-09 (latest) — calibration: the water workflow is now complete
 
@@ -313,7 +323,7 @@ temp dir: `tsc --noEmit` clean, `npm run build` clean (2317 modules), and
   source. `data/researchers.json` held fabricated seed profiles ("Dr. Amina
   Benali", h-index 12, publications "Attention Is All You Need" / BERT) feeding
   the legacy `/api/biblio/profiles/*` endpoints. That system is still live and
-  still slated for removal — see Pending #1.
+  still slated for removal — see Pending #6.
 - The pre-merge folders are now gitignored and kept on disk for reference only.
 
 ### ⚠️ Exposed credential — needs rotation
@@ -507,65 +517,61 @@ All in `frontend/src/app/App.tsx` unless stated otherwise.
 Ordered by value to LRSTE, not by effort. Previously-listed items now **done**:
 MIS sub-resource create hooks, `searchSuggestions`, the ArXiv/PubMed/Scopus
 fetchers, pgvector dedup, the sensor-reading ingestion UI, the reading-delete
-route, the irrigation-event log, the calibration UI (2026-08-09), and the ORCID
-publications ETL + parcel delete (2026-08-10). With calibration wired, **the
-digital-twin water workflow is complete**; the items below are elsewhere in the
-platform.
+route, the irrigation-event log, the calibration UI (2026-08-09), the ORCID
+publications ETL + parcel delete, and the commit reattribution (2026-08-10).
+With calibration wired, **the digital-twin water workflow is complete**; the
+items below are elsewhere in the platform.
 
-1. **Four unpushed commits are authored `medaz <medaz@example.com>`**
-   (`681ae05`, `7f40b74`, `d91e14f`, `c142486`) — not the user's identity.
-   Repo-local `user.name`/`user.email` are now `azizhraghi
-   <azizhraghi@gmail.com>`, so new commits are correct, but those four are not.
-   Because they are unpushed, `git rebase --root --exec 'git commit --amend
-   --reset-author --no-edit'` (or a filter-branch over that range) can still fix
-   them without a force-push. Ask before rewriting.
-2. **Still no delete/edit on most things.** Readings and parcels now have
+Working tree is **clean** as of 2026-08-10 and `main` is pushed — no
+uncommitted work is waiting, for the first time in three sessions.
+
+1. **Still no delete/edit on most things.** Readings and parcels now have
    deletes; there is still no `DELETE /api/veille/sources/{id}` and no
    `PUT`/`DELETE` on researchers. Follow the pattern now set twice: scope child
    lookups to the parent, refuse with 409 + counts rather than cascading, and
    return what the caller needs to know rather than a bare message.
-3. **`scholar_sync.py` is dead code**, exactly as `orcid_sync.py` was — imported
+2. **`scholar_sync.py` is dead code**, exactly as `orcid_sync.py` was — imported
    nowhere. Now that the publication upsert service exists
    (`services/publication_sync.py`), wiring Scholar publications is mostly
    reusing `upsert_works_for_researcher` with a different extractor. Scopus
    likewise returns only metrics today.
-4. **`download_cv_pdf` writes `tmp_cv_{id}.pdf` to the repo root and never
+3. **`download_cv_pdf` writes `tmp_cv_{id}.pdf` to the repo root and never
    deletes it**, and it is not gitignored. Harmless until now; the CV route
    produces something genuinely useful as of this session, so it will be hit
    more often. Use a `tempfile.NamedTemporaryFile` + `BackgroundTask` cleanup.
-5. **Three list routes skip the parent-existence check** and return `[]` with
+4. **Three list routes skip the parent-existence check** and return `[]` with
    HTTP 200 for a parcel that does not exist: `list_irrigation_events`,
    `list_calibrations`, and `GET /readings`. The two new biblio routes 404
    correctly — copy that. Cheap to fix together, and worth doing before
    anything builds on "empty means no data".
-6. **`/recommend` ignores the calibrated crop coefficient.** It reads the static
+5. **`/recommend` ignores the calibrated crop coefficient.** It reads the static
    `CROP_COEFFICIENTS` table while simulation and optimisation go through
    `get_active_crop_coefficient`. Applying a calibration therefore does not move
    the number the user actually looks at. Either route `/recommend` through the
    active profile or state the split in the API docs — but the current
    half-and-half is the kind of thing that quietly discredits the feature.
-7. **Remove the legacy JSON profile system.** `/api/biblio/profiles/*` (6
+6. **Remove the legacy JSON profile system.** `/api/biblio/profiles/*` (6
    endpoints, `agents/bibliometrie/router.py:97-139`) is a parallel researcher
    store from pre-merge code, backed by the now-gitignored `data/researchers.json`
    of fabricated profiles. The DB-backed `/api/biblio/researchers` is the real one.
-8. **`@app.on_event("startup")` is deprecated** (`api/main.py:46`) — migrate to a
+7. **`@app.on_event("startup")` is deprecated** (`api/main.py:46`) — migrate to a
    FastAPI lifespan handler.
-9. **InMemory bus dispatches synchronously** inside the publisher's coroutine
+8. **InMemory bus dispatches synchronously** inside the publisher's coroutine
    (`shared/event_bus.py:118`). Bibliometrie's Scholar call + PDF regeneration run
    *inside the HTTP request that triggered the scrape* — a request-timeout bug, not
    just a scaling note. Redis publish failures are also swallowed silently
    (`:56-58`, returns `""`), so `EVENT_BUS_TYPE=redis` without Redis running means
    agents stop communicating with no error anywhere.
-10. **Audit the veille/biblio router auth comments** before any deployment: two
+9. **Audit the veille/biblio router auth comments** before any deployment: two
     endpoints carry "No auth required for dev testing" despite the global
     `Depends(get_current_user)`. Confirm `DISABLE_AUTH=false` in prod — it returns
     an `administrator` stub to every caller.
-11. **Celery decision:** `celery>=5.4.0` is still in `requirements/base.txt` with no
+10. **Celery decision:** `celery>=5.4.0` is still in `requirements/base.txt` with no
     Celery app (the dead `tasks.py` files are now deleted). Stand up a real worker
     or drop the dependency.
-12. **Dependencies are unpinned** (`>=` throughout, no lockfile) — builds are not
+11. **Dependencies are unpinned** (`>=` throughout, no lockfile) — builds are not
     reproducible across machines.
-13. **Scope-honesty pass:** simulation is a FAO-56 water-balance bucket (not
+12. **Scope-honesty pass:** simulation is a FAO-56 water-balance bucket (not
     SWAT/HEC-HMS/EPANET); optimisation is a constrained greedy scheduler (not
     Bayesian/GA). Both are legitimate, useful tools for irrigation scheduling —
     recommend relabelling the cahier des charges rather than promising engines the
@@ -575,18 +581,18 @@ platform.
     engine present — which is one of the four the cahier's own line 95 names,
     and the right one for *parcelles irriguées*. Of the three promised twin
     domains only that one exists (no *bassin versant*, no *réseaux hydrauliques*).
-14. **MIS/DigitalTwin/Simulation/Optimisation subscribe to nothing**
+13. **MIS/DigitalTwin/Simulation/Optimisation subscribe to nothing**
     (`_setup_subscriptions` is `pass`). They are REST-only services, so creating a
     project does not auto-create a parcel or trigger a run. The "multi-agent" claim
     holds for 4 of 8 agents.
-15. **No anomaly detection exists anywhere**, though the cahier requires it of the
+14. **No anomaly detection exists anywhere**, though the cahier requires it of the
     Ingestion IoT agent. `quality_flag` is stored on every reading and never
     computed from anything.
-16. **`agents/mis/agent.py` is 37 lines whose only behaviour is `print()`.** None
+15. **`agents/mis/agent.py` is 37 lines whose only behaviour is `print()`.** None
     of the cahier's MIS automations (reminders, budget-vs-deliverable checks,
     reports, insights) exist. The MIS *router* is real and useful; the agent is
     not.
-17. **Orchestrator history is in-memory** and wiped on restart, so it is not an
+16. **Orchestrator history is in-memory** and wiped on restart, so it is not an
     audit trail despite being presented as one.
 
 ## Standing principle
