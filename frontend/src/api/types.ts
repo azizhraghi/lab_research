@@ -87,6 +87,65 @@ export interface IrrigationEvent {
   created_at: string;
 }
 
+/**
+ * Fitted water-balance parameters. The server column is a free-form JSON dict,
+ * so these are the keys `create_calibration_candidate` actually writes
+ * (agents/digitaltwin/services/calibration.py:126-133) rather than a contract
+ * Pydantic enforces.
+ */
+export interface CalibrationParameters {
+  /** Fitted Kc. Reaches simulation/optimisation via get_active_crop_coefficient,
+   *  but NOT /recommend, which reads the static CROP_COEFFICIENTS table. */
+  crop_coefficient: number;
+  /** The only parameter `apply` writes back onto the parcel. */
+  field_capacity_mm: number;
+  wilting_point_mm: number;
+  /** The crop's FAO-56 value before fitting — the multiplier baseline. */
+  base_crop_coefficient: number;
+  calibration_method: string;
+  irrigation_timing_assumption: string;
+}
+
+/** Fit error against the withheld daily observations. Lower is better; bias
+ *  shows direction (positive = the model predicts wetter than measured). */
+export interface CalibrationMetrics {
+  mae_mm: number;
+  rmse_mm: number;
+  bias_mm: number;
+  /** One fewer than observation_count — the first day seeds the balance. */
+  validation_observations: number;
+}
+
+export interface CalibrationDataQuality {
+  observation_count: number;
+  calendar_days: number;
+  coverage_pct: number;
+  /** Events inside the window. Zero on an irrigated parcel means the fit is
+   *  explaining away applied water as rainfall or a wrong Kc. */
+  irrigation_event_count: number;
+  measurement_requirement: string;
+  accepted_data_origins: string[];
+  weather_inputs: string;
+  status: string;
+}
+
+/** candidate → applied; applying supersedes whatever was previously applied. */
+export type CalibrationStatus = "candidate" | "applied" | "superseded";
+
+export interface CalibrationProfile {
+  id: number;
+  parcel_id: number;
+  created_at: string;
+  source_start_date: string;
+  source_end_date: string;
+  status: CalibrationStatus;
+  parameters: CalibrationParameters;
+  metrics: CalibrationMetrics;
+  data_quality: CalibrationDataQuality;
+  reviewed_by?: string | null;
+  applied_at?: string | null;
+}
+
 export interface Recommendation {
   id: number;
   generated_at: string;

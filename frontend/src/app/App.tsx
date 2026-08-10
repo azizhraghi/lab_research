@@ -23,7 +23,7 @@ import {
   XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer
 } from "recharts";
 import { useAuth } from "../auth/AuthContext";
-import type { Article, Researcher as ApiResearcher, HistoriqueEvenement, Projet, Personnel, Equipement, Parcel, ParcelDetail, SensorReadingFull } from "../api/types";
+import type { Article, Researcher as ApiResearcher, HistoriqueEvenement, Projet, Personnel, Equipement, Parcel, ParcelDetail, SensorReadingFull, CalibrationProfile } from "../api/types";
 import { API_BASE_URL } from "../lib/apiClient";
 import { useArticles, useTriggerScrape, useSources, useCreateSource } from "../api/veille";
 import { useResearchers, useSyncResearcher, useCreateResearcher } from "../api/biblio";
@@ -44,7 +44,10 @@ import {
   useReadings,
   useCreateReading,
   useImportReadings,
+  useApplyCalibration,
+  useCalibrations,
   useDeleteReading,
+  useRunCalibration,
   useIrrigationEvents,
   useRecordIrrigation,
   useRecommend,
@@ -293,6 +296,17 @@ function Field({ label, hint, required, children }: {
 
 const inputCls =
   "w-full px-3 py-2 text-sm bg-muted border border-border rounded-xl focus:outline-none focus:ring-2 focus:ring-primary/30 transition-all";
+
+/** Compact labelled figure for read-only result grids. */
+function Stat({ label, value, sub }: { label: string; value: string; sub?: string }) {
+  return (
+    <div>
+      <div className="text-[10px] text-muted-foreground uppercase tracking-wide">{label}</div>
+      <div className="text-sm font-bold text-foreground font-mono">{value}</div>
+      {sub && <div className="text-[10px] text-muted-foreground">{sub}</div>}
+    </div>
+  );
+}
 
 function FormError({ error }: { error: unknown }) {
   if (!error) return null;
@@ -2719,6 +2733,369 @@ function RecommendationPanel({ parcelId, parcel, readingCount, latestReadingAt }
   );
 }
 
+// ─── CALIBRATION ─────────────────────────────────────────────────────────────
+// Fits this parcel's own water-balance parameters instead of the generic soil
+// defaults. Deliberately two-step: a researcher fits a candidate, a reviewer or
+// administrator applies it (router.py:418-422), because applying overwrites the
+// parcel's field capacity and every later recommendation depends on it.
+
+/** Longest unbroken run of calendar days ending at the newest eligible reading.
+ *  Mirrors the server gate (calibration.py:59-73): one `ok` reading per day with
+ *  data_origin in {field, field_import}, no gaps. Computed here only so the user
+ *  sees why a run would fail before spending a request on it. */
+function eligibleCoverage(readings?: SensorReadingFull[]) {
+  if (!readings || readings.length === 0) return null;
+  const eligible = readings.filter(
+    r => r.quality_flag === "ok" &&
+      (r.data_origin === "field" || r.data_origin === "field_import"),
+  );
+  if (eligible.length === 0)
+    return { days: 0, start: null, end: null, excluded: readings.length, duplicateDays: 0 };
+  const dayKeys = [...new Set(eligible.map(r => r.recorded_at.slice(0, 10)))].sort();
+  // More than one eligible reading on a day means only one of them is fitted.
+  // calibration.py:61-64 keeps the latest by timestamp, but its comparison is a
+  // strict >, so same-timestamp rows from two sensors resolve by insertion
+  // order and the other series is dropped without a word.
+  const duplicateDays = dayKeys.filter(
+    day => eligible.filter(r => r.recorded_at.slice(0, 10) === day).length > 1,
+  ).length;
+  // Walk back from the newest day while each step is exactly one day earlier.
+  let runStart = dayKeys.length - 1;
+  for (let i = dayKeys.length - 1; i > 0; i--) {
+    const gapMs = Date.parse(`${dayKeys[i]}T00:00:00Z`) - Date.parse(`${dayKeys[i - 1]}T00:00:00Z`);
+    if (gapMs !== 86_400_000) break;
+    runStart = i - 1;
+  }
+  return {
+    days: dayKeys.length - runStart,
+    start: dayKeys[runStart],
+    end: dayKeys[dayKeys.length - 1],
+    excluded: readings.length - eligible.length,
+    duplicateDays,
+  };
+}
+
+/** Field capacity is only identifiable when the soil actually reached the
+ *  ceiling during the window. If the wettest reading stays below the fitted
+ *  value, every candidate above it predicts identically and the grid search
+ *  returns its lowest non-clipping option (calibration.py:105 keeps the first
+ *  of a tie) — an artifact of grid order, not a measurement. Since `apply`
+ *  writes exactly this number onto the parcel, the distinction matters.
+ *
+ *  Caveat: a profile does not store the readings it was fitted on, so this
+ *  re-derives the check from whatever readings exist NOW. For an old profile
+ *  whose readings were since corrected or deleted, treat the badge as a
+ *  statement about today's data, not about that fit. */
+function fieldCapacityIdentified(profile: CalibrationProfile, readings?: SensorReadingFull[]) {
+  if (!readings) return null;
+  const inWindow = readings.filter(
+    r => r.recorded_at.slice(0, 10) >= profile.source_start_date &&
+      r.recorded_at.slice(0, 10) <= profile.source_end_date,
+  );
+  if (inWindow.length === 0) return null;
+  const wettest = Math.max(...inWindow.map(r => r.soil_moisture_mm));
+  // Saturation clips at the ceiling, so an identified fit sits at the wettest
+  // observation rather than above it.
+  return { identified: wettest >= profile.parameters.field_capacity_mm - 0.01, wettest };
+}
+
+function RunCalibrationForm({ parcelId, coverage, onDone }: {
+  parcelId: number;
+  coverage: ReturnType<typeof eligibleCoverage>;
+  onDone: () => void;
+}) {
+  const [startDate, setStartDate] = useState("");
+  const [endDate, setEndDate] = useState("");
+  const [minObs, setMinObs] = useState("14");
+  const run = useRunCalibration();
+
+  const minObsNum = Number(minObs);
+  const minObsEntered = minObs.trim() !== "" && Number.isFinite(minObsNum);
+  // Server bounds are ge=7, le=365 — both would return an opaque 422.
+  const minObsOutOfRange = minObsEntered && (minObsNum < 7 || minObsNum > 365);
+  const rangeInverted = startDate !== "" && endDate !== "" && startDate > endDate;
+  const shortOfCoverage =
+    coverage !== null && minObsEntered && !minObsOutOfRange && coverage.days < minObsNum;
+  const blocked = minObsOutOfRange || rangeInverted || !minObsEntered;
+
+  const submit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (blocked) return;
+    run.mutate(
+      {
+        parcelId,
+        body: {
+          start_date: startDate === "" ? null : startDate,
+          end_date: endDate === "" ? null : endDate,
+          min_observations: minObsNum,
+        },
+      },
+      { onSuccess: onDone },
+    );
+  };
+
+  return (
+    <form onSubmit={submit} className="space-y-3">
+      <p className="text-[11px] text-muted-foreground bg-muted rounded-xl px-3 py-2">
+        This only produces a candidate. Nothing about the parcel changes until a
+        reviewer applies it, so it is safe to run more than once.
+      </p>
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="From" hint="Optional — earliest reading day to include.">
+          <input type="date" value={startDate}
+            onChange={e => setStartDate(e.target.value)} className={inputCls} />
+        </Field>
+        <Field label="To" hint="Optional — latest reading day to include.">
+          <input type="date" value={endDate}
+            onChange={e => setEndDate(e.target.value)} className={inputCls} />
+        </Field>
+      </div>
+      {rangeInverted && (
+        <p className="text-[11px] text-red-700 bg-red-50 border border-red-200 rounded-xl px-3 py-2">
+          The start date is after the end date, which would select no readings.
+        </p>
+      )}
+      <Field label="Minimum observations" required
+        hint="Server accepts 7–365. The window must also have no missing days.">
+        <input type="number" required min={7} max={365} step={1} value={minObs}
+          onChange={e => setMinObs(e.target.value)} className={inputCls} />
+      </Field>
+      {minObsOutOfRange && (
+        <p className="text-[11px] text-red-700 bg-red-50 border border-red-200 rounded-xl px-3 py-2">
+          Must be between 7 and 365.
+        </p>
+      )}
+      {shortOfCoverage && (
+        <p className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded-xl px-3 py-2">
+          This parcel currently has {coverage!.days} unbroken day
+          {coverage!.days === 1 ? "" : "s"} of eligible readings, fewer than the{" "}
+          {minObsNum} you are asking for. The run will be rejected — add the
+          missing days first.
+        </p>
+      )}
+      <FormError error={run.error} />
+      <SubmitButton pending={run.isPending} label="Fit candidate" />
+    </form>
+  );
+}
+
+function CalibrationPanel({ parcelId, parcel, readings }: {
+  parcelId: number;
+  parcel?: ParcelDetail;
+  readings?: SensorReadingFull[];
+}) {
+  const { data: profiles } = useCalibrations(parcelId);
+  const [runOpen, setRunOpen] = useState(false);
+  const [toApply, setToApply] = useState<CalibrationProfile | null>(null);
+  const [reviewedBy, setReviewedBy] = useState("");
+  const apply = useApplyCalibration();
+
+  const coverage = eligibleCoverage(readings);
+  const applied = profiles?.find(p => p.status === "applied") ?? null;
+  const nameTooShort = reviewedBy.trim() !== "" && reviewedBy.trim().length < 2;
+
+  const confirmApply = () => {
+    if (!toApply) return;
+    apply.mutate(
+      { profileId: toApply.id, reviewedBy: reviewedBy.trim(), parcelId },
+      { onSuccess: () => { setToApply(null); setReviewedBy(""); } },
+    );
+  };
+
+  return (
+    <div className="bg-card border border-border rounded-2xl p-5">
+      <div className="flex items-center justify-between gap-3 mb-1">
+        <h3 className="font-bold text-foreground font-jakarta">Calibration</h3>
+        <button
+          onClick={() => setRunOpen(true)}
+          className="flex items-center gap-1.5 text-xs font-semibold px-3 py-1.5 rounded-xl bg-primary text-primary-foreground hover:opacity-90 transition-opacity"
+        >
+          <Target size={13} /> Fit candidate
+        </button>
+      </div>
+      <p className="text-[11px] text-muted-foreground mb-4">
+        Fits this parcel's own crop coefficient and field capacity against its
+        measured days, instead of the generic {parcel?.soil_type ?? "soil"} defaults.
+      </p>
+
+      {/* Coverage precheck — the gate is strict, so show it before a run fails. */}
+      <div className="mb-4 rounded-xl border border-border bg-muted px-3 py-2 text-[11px] text-muted-foreground">
+        {!readings ? "Checking reading coverage…" : coverage === null || coverage.days === 0 ? (
+          <>No calibration-eligible readings yet. A run needs readings flagged{" "}
+            <span className="font-mono">ok</span> whose origin is{" "}
+            <span className="font-mono">field</span> or{" "}
+            <span className="font-mono">field_import</span> — manual entry and CSV
+            import both qualify, seeded and demo rows deliberately do not.</>
+        ) : (
+          <>
+            <span className="font-semibold text-foreground">{coverage.days} unbroken day
+            {coverage.days === 1 ? "" : "s"}</span>{" "}
+            of eligible readings ({coverage.start} → {coverage.end}).
+            {coverage.days < 14 && " A run needs at least 7, and 14 is the default."}
+            {coverage.excluded > 0 && ` ${coverage.excluded} reading${coverage.excluded === 1 ? "" : "s"} excluded as ineligible.`}
+            {coverage.duplicateDays > 0 && (
+              <span className="block mt-1 text-amber-700 font-semibold">
+                {coverage.duplicateDays} day{coverage.duplicateDays === 1 ? " has" : "s have"} more
+                than one eligible reading. Only one per day is fitted and the rest are dropped
+                silently, so a second sensor will not improve this fit.
+              </span>
+            )}
+          </>
+        )}
+      </div>
+
+      {!profiles ? (
+        <p className="text-xs text-muted-foreground">Loading calibration profiles…</p>
+      ) : profiles.length === 0 ? (
+        <p className="text-xs text-muted-foreground">
+          No calibration yet, so this parcel is still running on default
+          parameters. Field capacity {parcel?.field_capacity_mm ?? "—"} mm comes
+          from its soil type, not from its own measurements.
+        </p>
+      ) : (
+        <div className="space-y-3">
+          {profiles.map(p => {
+            const fc = fieldCapacityIdentified(p, readings);
+            return (
+              <div key={p.id} className={`rounded-xl border p-3 ${
+                p.status === "applied" ? "border-emerald-200 bg-emerald-50"
+                  : p.status === "candidate" ? "border-border bg-muted"
+                  : "border-border bg-card opacity-70"
+              }`}>
+                <div className="flex items-start justify-between gap-3 mb-2">
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs font-semibold text-foreground">
+                        Profile #{p.id}
+                      </span>
+                      <span className={`px-2 py-0.5 rounded-lg text-[10px] font-semibold ${
+                        p.status === "applied" ? "text-emerald-700 bg-emerald-100 border border-emerald-300"
+                          : p.status === "candidate" ? "text-amber-700 bg-amber-50 border border-amber-200"
+                          : "text-muted-foreground bg-muted border border-border"
+                      }`}>{p.status}</span>
+                    </div>
+                    <div className="text-[10px] text-muted-foreground mt-0.5">
+                      {p.source_start_date} → {p.source_end_date} ·{" "}
+                      {p.data_quality.observation_count} days ·{" "}
+                      {p.data_quality.irrigation_event_count} irrigation event
+                      {p.data_quality.irrigation_event_count === 1 ? "" : "s"}
+                      {p.reviewed_by && ` · applied by ${p.reviewed_by}`}
+                    </div>
+                  </div>
+                  {p.status === "candidate" && (
+                    <button
+                      onClick={() => { apply.reset(); setToApply(p); }}
+                      className="shrink-0 flex items-center gap-1.5 text-xs font-semibold px-3 py-1.5 rounded-xl border border-border text-foreground hover:bg-card transition-colors"
+                    >
+                      <CheckCircle2 size={13} /> Apply
+                    </button>
+                  )}
+                </div>
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-[11px]">
+                  <Stat label="Crop coefficient" value={p.parameters.crop_coefficient.toFixed(3)}
+                    sub={`base ${p.parameters.base_crop_coefficient}`} />
+                  <Stat label="Field capacity" value={`${p.parameters.field_capacity_mm.toFixed(1)} mm`}
+                    sub={fc === null ? undefined : fc.identified ? "constrained by data" : "not identified"} />
+                  <Stat label="RMSE" value={`${p.metrics.rmse_mm.toFixed(2)} mm`}
+                    sub={`${p.metrics.validation_observations} days checked`} />
+                  <Stat label="Bias" value={`${p.metrics.bias_mm > 0 ? "+" : ""}${p.metrics.bias_mm.toFixed(2)} mm`}
+                    sub={p.metrics.bias_mm > 0 ? "predicts wetter" : p.metrics.bias_mm < 0 ? "predicts drier" : "centred"} />
+                </div>
+                {fc && !fc.identified && (
+                  <p className="mt-2 text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded-xl px-3 py-2">
+                    Field capacity is not constrained by these readings — the soil
+                    never reached the ceiling (wettest was {fc.wettest.toFixed(1)} mm).
+                    Any value above that fits equally well, so{" "}
+                    {p.parameters.field_capacity_mm.toFixed(1)} mm is the lowest the
+                    search could pick, not a measurement. The crop coefficient
+                    above is unaffected.
+                  </p>
+                )}
+                {p.data_quality.irrigation_event_count === 0 && (
+                  <p className="mt-2 text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded-xl px-3 py-2">
+                    No irrigation was logged in this window. If any water was
+                    applied, the fit has absorbed it into the crop coefficient.
+                  </p>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {applied && (
+        <p className="mt-3 text-[11px] text-muted-foreground">
+          Applied profiles set the parcel's field capacity. The fitted crop
+          coefficient is read by the simulation and optimisation agents, but the
+          recommendation still uses the standard value for{" "}
+          {parcel?.crop_type ?? "this crop"} — that path does not consult
+          calibration.
+        </p>
+      )}
+
+      <Modal open={runOpen} onClose={() => setRunOpen(false)}
+        title="Fit a calibration candidate"
+        subtitle={`POST /api/twin/parcels/${parcelId}/calibrations/run · requires researcher, reviewer or administrator`}>
+        <RunCalibrationForm parcelId={parcelId} coverage={coverage}
+          onDone={() => setRunOpen(false)} />
+      </Modal>
+
+      <Modal open={Boolean(toApply)}
+        onClose={() => !apply.isPending && setToApply(null)}
+        title={`Apply calibration #${toApply?.id ?? ""}?`}
+        subtitle={`POST /api/twin/calibrations/${toApply?.id ?? ""}/apply · requires reviewer or administrator`}>
+        {toApply && (
+          <div className="space-y-3">
+            <p className="text-xs text-muted-foreground">
+              This sets the parcel's field capacity to{" "}
+              <span className="font-semibold text-foreground">
+                {toApply.parameters.field_capacity_mm.toFixed(1)} mm
+              </span>{" "}
+              (currently {parcel?.field_capacity_mm ?? "—"} mm) and supersedes any
+              profile already applied. Recommendations generated afterwards use
+              the new value; ones already stored keep the old one.
+            </p>
+            {(() => {
+              const fc = fieldCapacityIdentified(toApply, readings);
+              return fc && !fc.identified ? (
+                <p className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded-xl px-3 py-2">
+                  Note this window never saturated the soil, so the field capacity
+                  you are about to write is the search's lowest non-clipping
+                  option rather than a fitted measurement.
+                </p>
+              ) : null;
+            })()}
+            <Field label="Reviewed by" required
+              hint="Recorded on the profile as the person accountable. 2–100 characters.">
+              <input value={reviewedBy} onChange={e => setReviewedBy(e.target.value)}
+                placeholder="Full name" className={inputCls} />
+            </Field>
+            {nameTooShort && (
+              <p className="text-[11px] text-red-700 bg-red-50 border border-red-200 rounded-xl px-3 py-2">
+                At least 2 characters.
+              </p>
+            )}
+            <FormError error={apply.error} />
+            <div className="flex gap-2">
+              <button type="button" onClick={() => setToApply(null)}
+                disabled={apply.isPending}
+                className="flex-1 px-4 py-2 text-sm font-semibold rounded-xl border border-border text-foreground hover:bg-muted disabled:opacity-50 transition-colors">
+                Cancel
+              </button>
+              <button type="button" onClick={confirmApply}
+                disabled={apply.isPending || reviewedBy.trim().length < 2}
+                className="flex-1 flex items-center justify-center gap-2 px-4 py-2 text-sm font-semibold rounded-xl bg-primary text-primary-foreground hover:opacity-90 disabled:opacity-50 transition-opacity">
+                {apply.isPending ? <Loader2 size={15} className="animate-spin" /> : <CheckCircle2 size={15} />}
+                {apply.isPending ? "Applying…" : "Apply calibration"}
+              </button>
+            </div>
+          </div>
+        )}
+      </Modal>
+    </div>
+  );
+}
+
 // ─── IOT PAGE ────────────────────────────────────────────────────────────────
 function IoTPage() {
   const [selectedId, setSelectedId] = useState<number | null>(null);
@@ -3047,6 +3424,10 @@ function IoTPage() {
           </div>
         )}
       </div>
+
+      {effectiveId && (
+        <CalibrationPanel parcelId={effectiveId} parcel={parcel} readings={rawReadings} />
+      )}
 
       {/* Data-quality flags */}
       <div className="bg-card border border-border rounded-2xl p-5">

@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { apiFetch } from "../lib/apiClient";
 import type {
+  CalibrationProfile,
   IrrigationEvent,
   OptimizationRun,
   Parcel,
@@ -209,6 +210,97 @@ export function useDeleteReading() {
     onSuccess: (_data, { parcelId }) => {
       qc.invalidateQueries({ queryKey: ["twin", "readings", parcelId] });
       qc.invalidateQueries({ queryKey: ["twin", "parcel", parcelId] });
+    },
+  });
+}
+
+/**
+ * GET /api/twin/parcels/{id}/calibrations — newest first, server limit 1..100.
+ * No role guard on reading them, unlike running or applying.
+ */
+export function useCalibrations(id?: number | null, limit = 10) {
+  return useQuery<CalibrationProfile[]>({
+    queryKey: ["twin", "calibrations", id, limit],
+    queryFn: () =>
+      apiFetch<CalibrationProfile[]>(
+        `/api/twin/parcels/${id}/calibrations?limit=${limit}`,
+      ),
+    enabled: Boolean(id),
+  });
+}
+
+/**
+ * Body accepted by POST /api/twin/parcels/{id}/calibrations/run — mirrors
+ * CalibrationRunRequest. Dates are plain "YYYY-MM-DD" and are inclusive
+ * filters on the reading window; omitting both fits every eligible reading.
+ */
+export interface CalibrationRunRequest {
+  start_date?: string | null;
+  end_date?: string | null;
+  /** Server enforces ge=7, le=365. Default 14. */
+  min_observations?: number;
+}
+
+/**
+ * Fit a calibration candidate. Returns 400 — not 422 — when the readings do not
+ * satisfy the gate, and the message is the one to show the user verbatim:
+ * either too few quality-checked field readings, or a gap in the daily series
+ * (calibration.py:53-73 wants one `ok` reading with data_origin in
+ * {field, field_import} for EVERY calendar day in the window, no gaps).
+ * Produces a candidate only — nothing about the parcel changes until it is
+ * applied, so this is safe to run repeatedly.
+ */
+export function useRunCalibration() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      parcelId,
+      body,
+    }: {
+      parcelId: number;
+      body: CalibrationRunRequest;
+    }) =>
+      apiFetch<CalibrationProfile>(
+        `/api/twin/parcels/${parcelId}/calibrations/run`,
+        { method: "POST", body: JSON.stringify(body) },
+      ),
+    onSuccess: (_data, { parcelId }) =>
+      qc.invalidateQueries({ queryKey: ["twin", "calibrations", parcelId] }),
+  });
+}
+
+/**
+ * POST /api/twin/calibrations/{profileId}/apply — note this route is NOT nested
+ * under /parcels, and is guarded by require_roles("reviewer", "administrator"):
+ * a researcher can fit a candidate but not commit it.
+ *
+ * Applying writes `parameters.field_capacity_mm` onto the parcel and marks any
+ * previously applied profile superseded. It does NOT touch the parcel's crop
+ * type or wilting point. Only a profile still in `candidate` status can be
+ * applied — a second attempt returns 400.
+ */
+export function useApplyCalibration() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      profileId,
+      reviewedBy,
+    }: {
+      profileId: number;
+      /** Server enforces 2..100 characters. */
+      reviewedBy: string;
+      /** Not sent — used to scope cache invalidation. */
+      parcelId: number;
+    }) =>
+      apiFetch<CalibrationProfile>(
+        `/api/twin/calibrations/${profileId}/apply`,
+        { method: "POST", body: JSON.stringify({ reviewed_by: reviewedBy }) },
+      ),
+    onSuccess: (_data, { parcelId }) => {
+      qc.invalidateQueries({ queryKey: ["twin", "calibrations", parcelId] });
+      // The parcel's field_capacity_mm changed, so anything showing it is stale.
+      qc.invalidateQueries({ queryKey: ["twin", "parcel", parcelId] });
+      qc.invalidateQueries({ queryKey: ["twin", "parcels"] });
     },
   });
 }
