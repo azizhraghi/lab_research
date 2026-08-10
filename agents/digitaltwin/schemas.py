@@ -201,6 +201,19 @@ class SensorReadingImportResponse(BaseModel):
     errors: List[str] = []
 
 
+class ParcelDeleteResponse(BaseModel):
+    """Outcome of removing a parcel.
+
+    Only returned when the parcel had no dependent rows. A parcel with children
+    is refused with 409 and the same per-table counts in the error detail, so the
+    caller learns what blocks the delete rather than just that it failed.
+    """
+
+    deleted_id: int
+    code: str
+    name: str
+
+
 class SensorReadingDeleteResponse(BaseModel):
     """Outcome of removing one sensor reading.
 

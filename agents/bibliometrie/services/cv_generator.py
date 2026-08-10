@@ -136,34 +136,56 @@ def generate_cv(researcher, output_path: str) -> str:
     return output_path
 
 
+class _Pub:
+    """One publication row shaped for `generate_cv`.
+
+    `topic` is what the generator prints as the middle metadata field. For a real
+    publication the journal and year say far more than a topic label, so that is
+    what goes there; falling back to the source only when there is no journal.
+    """
+
+    def __init__(self, p: dict):
+        year = p.get("year")
+        journal = p.get("journal")
+        self.id = p.get("doi") or "no DOI"
+        self.title = p.get("title") or "Untitled"
+        self.year = year
+        if journal and year:
+            self.topic = f"{journal}, {year}"
+        elif journal:
+            self.topic = journal
+        elif year:
+            self.topic = str(year)
+        else:
+            self.topic = "year unknown"
+        self.source = p.get("source") or "database"
+
+
+class _MinimalResearcher:
+    """Adapts the router's dict into the attribute shape `generate_cv` expects."""
+
+    def __init__(self, d: dict):
+        self.name = d.get("name", "Unknown")
+        self.email = d.get("email")
+        # These were hardcoded to None, so a researcher's ORCID never appeared on
+        # their own CV even when the profile had one.
+        self.orcid = d.get("orcid_id")
+        self.google_scholar_id = d.get("scholar_id")
+        indicators = {i["metric_name"]: i["value"] for i in d.get("indicators", [])}
+        self.h_index = indicators.get("h_index")
+        self.citation_count = indicators.get("total_citations")
+        # Newest first — a CV leads with recent work. Undated entries sort last.
+        self.publications = sorted(
+            (_Pub(p) for p in d.get("publications", [])),
+            key=lambda pub: (pub.year is not None, pub.year or 0),
+            reverse=True,
+        )
+        self.topics = []
+
+
 async def generate_cv_pdf(data: dict, output_path: str) -> str:
     """Async wrapper for generating a CV PDF from a dict (for the DB-backed router).
 
     This bridges the original DB-backed endpoint with the new ReportLab generator.
     """
-    from pydantic import BaseModel
-    from typing import Optional, List
-
-    # Build a minimal researcher-like object from the dict
-    class _MinimalResearcher:
-        def __init__(self, d):
-            self.name = d.get("name", "Unknown")
-            self.email = d.get("email")
-            self.orcid = None
-            self.google_scholar_id = None
-            indicators = {i["metric_name"]: i["value"] for i in d.get("indicators", [])}
-            self.h_index = indicators.get("h_index")
-            self.citation_count = indicators.get("total_citations")
-            self.publications = []
-            self.topics = []
-            for pub in d.get("publications", []):
-                class _Pub:
-                    def __init__(self, p):
-                        self.id = p.get("doi", "")
-                        self.title = p.get("title", "")
-                        self.topic = p.get("journal", "N/A")
-                        self.source = "database"
-                self.publications.append(_Pub(pub))
-
-    researcher = _MinimalResearcher(data)
-    return generate_cv(researcher, output_path)
+    return generate_cv(_MinimalResearcher(data), output_path)

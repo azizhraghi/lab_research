@@ -242,6 +242,24 @@ export interface Publication {
   citation_count: number;
 }
 
+/** Outcome of POST /api/biblio/researchers/{id}/publications/sync.
+ *
+ * The counts answer different questions and are worth showing separately:
+ * `works_found` is what ORCID holds, `publications_created` is what was new to
+ * the lab, and `links_created` is what was new to *this* researcher. A
+ * co-author's sync typically reports created 0 / links 1 — the paper was
+ * already on file, the authorship was not. */
+export interface OrcidSyncResult {
+  researcher_id: number;
+  source: string;
+  orcid_id: string;
+  works_found: number;
+  publications_created: number;
+  publications_enriched: number;
+  links_created: number;
+  links_already_present: number;
+}
+
 // ── MIS ───────────────────────────────────────────────────────────────
 
 export type ProjetStatut = "planifie" | "en_cours" | "termine" | "suspendu";

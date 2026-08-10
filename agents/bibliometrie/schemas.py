@@ -20,6 +20,26 @@ class PublicationResponse(PublicationBase):
     class Config:
         from_attributes = True
 
+class OrcidSyncResponse(BaseModel):
+    """Outcome of POST /researchers/{id}/publications/sync.
+
+    Counts are reported separately because they answer different questions:
+    `works_found` is what ORCID holds, `publications_created` is what was new to
+    the lab, and `links_created` is what was new to *this* researcher. A
+    co-author's second sync typically shows works_found > 0 with
+    publications_created == 0 and links_created > 0 — the paper already existed,
+    the authorship did not.
+    """
+    researcher_id: int
+    source: str
+    orcid_id: str
+    works_found: int
+    publications_created: int
+    publications_enriched: int
+    links_created: int
+    links_already_present: int
+
+
 class IndicatorResponse(BaseModel):
     metric_name: str
     value: float

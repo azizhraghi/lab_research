@@ -8,9 +8,11 @@ from shared.database import get_db
 from shared.security import require_roles
 from agents.bibliometrie.models import Researcher, Publication, BiblioIndicator, CVProfile, ResearcherPublication
 from agents.bibliometrie.schemas import (
-    ResearcherCreate, ResearcherResponse, 
-    PublicationResponse, CVProfileResponse
+    ResearcherCreate, ResearcherResponse,
+    PublicationResponse, CVProfileResponse, OrcidSyncResponse
 )
+from agents.bibliometrie.services.orcid_sync import OrcidUnavailable
+from agents.bibliometrie.services.publication_sync import sync_orcid_publications
 from agents.bibliometrie.services.cv_generator import generate_cv_pdf, generate_cv
 from agents.bibliometrie.agent import bibliometrie_agent
 from fastapi.responses import FileResponse
@@ -47,6 +49,63 @@ async def trigger_sync(researcher_id: int, db: AsyncSession = Depends(get_db)):
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
+@router.get("/researchers/{researcher_id}/publications", response_model=List[PublicationResponse])
+async def list_researcher_publications(researcher_id: int, db: AsyncSession = Depends(get_db)):
+    """The publications linked to one researcher, newest first.
+
+    404s when the researcher does not exist rather than returning `[]`, so an
+    empty list means "no publications on file" and nothing else. (The digital-twin
+    list routes still conflate the two — see HANDOFF Pending.)
+    """
+    if await db.get(Researcher, researcher_id) is None:
+        raise HTTPException(status_code=404, detail=f"Researcher {researcher_id} not found")
+
+    stmt = (
+        select(Publication)
+        .join(ResearcherPublication)
+        .where(ResearcherPublication.researcher_id == researcher_id)
+        .order_by(Publication.year.desc().nullslast(), Publication.title)
+    )
+    result = await db.execute(stmt)
+    return result.scalars().all()
+
+
+@router.post(
+    "/researchers/{researcher_id}/publications/sync",
+    response_model=OrcidSyncResponse,
+    dependencies=[Depends(require_roles("researcher", "reviewer", "administrator"))],
+)
+async def sync_researcher_publications(researcher_id: int, db: AsyncSession = Depends(get_db)):
+    """Import a researcher's works from their public ORCID record.
+
+    Roles mirror the metrics sync: whoever maintains a profile can refresh its
+    publication list. Idempotent — re-running matches on DOI (or title+year for
+    works without one) and only adds what is new.
+
+    A missing or unreachable ORCID iD is a 400 carrying ORCID's own reason, not a
+    500: the request was well-formed, the upstream record just is not usable. The
+    message is written to be shown to the user verbatim.
+    """
+    researcher = await db.get(Researcher, researcher_id)
+    if researcher is None:
+        raise HTTPException(status_code=404, detail=f"Researcher {researcher_id} not found")
+    if not researcher.orcid_id:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"{researcher.name} has no ORCID iD on file. Add one to the profile "
+                "before syncing publications."
+            ),
+        )
+
+    try:
+        result = await sync_orcid_publications(db, researcher)
+    except OrcidUnavailable as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return OrcidSyncResponse(orcid_id=researcher.orcid_id, **result)
+
+
 @router.get("/researchers/{researcher_id}/cv/pdf")
 async def download_cv_pdf(researcher_id: int, db: AsyncSession = Depends(get_db)):
     stmt = select(Researcher).where(Researcher.id == researcher_id)
@@ -71,11 +130,17 @@ async def download_cv_pdf(researcher_id: int, db: AsyncSession = Depends(get_db)
         "role": researcher.role,
         "department": researcher.department,
         "email": researcher.email,
+        # Identifiers were collected but never passed through, so every CV
+        # printed a bare name even for researchers with an ORCID on file.
+        "orcid_id": researcher.orcid_id,
+        "scholar_id": researcher.scholar_id,
         "indicators": [{"metric_name": i.metric_name, "value": i.value} for i in indicators],
         "publications": [{
-            "title": p.title, 
-            "year": p.year, 
-            "journal": p.journal, 
+            "title": p.title,
+            "year": p.year,
+            "journal": p.journal,
+            "doi": p.doi,
+            "source": p.source,
             "citation_count": p.citation_count
         } for p in publications]
     }

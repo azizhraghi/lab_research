@@ -15,6 +15,7 @@ from agents.digitaltwin.models import (
     Parcel,
     SensorReading,
     SimulationScenario,
+    WeatherForecast,
 )
 from agents.digitaltwin.schemas import (
     CalibrationProfileResponse,
@@ -25,6 +26,7 @@ from agents.digitaltwin.schemas import (
     IrrigationEventResponse,
     IrrigationRecommendationResponse,
     ParcelCreate,
+    ParcelDeleteResponse,
     ParcelDetailResponse,
     ParcelResponse,
     RecommendationInline,
@@ -62,6 +64,64 @@ async def create_parcel(data: ParcelCreate, db: AsyncSession = Depends(get_db)):
     await db.commit()
     await db.refresh(parcel)
     return parcel
+
+
+@router.delete(
+    "/parcels/{parcel_id}",
+    response_model=ParcelDeleteResponse,
+    dependencies=[Depends(require_roles("administrator"))],
+)
+async def delete_parcel(parcel_id: int, db: AsyncSession = Depends(get_db)):
+    """Remove a parcel, but only while nothing depends on it.
+
+    Six tables carry a foreign key to twin_parcels and none declares a cascade.
+    Rather than add one, this refuses with 409 while any child row exists and
+    names the counts. The reasoning is that measurements are the expensive thing
+    here: a season of readings and the calibrations fitted from them cannot be
+    re-collected, so a single click must not be able to destroy them. Deleting
+    the children is a deliberate, separate act — readings have their own delete
+    route, and the rest are cheap to regenerate.
+
+    Roles match create_parcel (administrator only), unlike the reading route
+    which is open to whoever records data.
+    """
+    parcel = await db.get(Parcel, parcel_id)
+    if not parcel:
+        raise HTTPException(status_code=404, detail=f"Parcel {parcel_id} not found")
+
+    # Ordered most-precious first, so the message leads with what actually
+    # matters to protect. Labels are what the API calls these, not table names.
+    dependants = (
+        ("sensor readings", SensorReading),
+        ("calibration profiles", CalibrationProfile),
+        ("irrigation events", IrrigationEvent),
+        ("recommendations", IrrigationRecommendation),
+        ("weather forecasts", WeatherForecast),
+        ("simulation scenarios", SimulationScenario),
+    )
+    blocking: list[str] = []
+    for label, model in dependants:
+        count_result = await db.execute(
+            select(func.count()).select_from(model).where(model.parcel_id == parcel_id)
+        )
+        count = count_result.scalar_one()
+        if count:
+            blocking.append(f"{count} {label}")
+
+    if blocking:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Parcel {parcel.code} still has {', '.join(blocking)}. "
+                "Delete or archive them first — this refuses rather than "
+                "cascading so field measurements cannot be lost by mistake."
+            ),
+        )
+
+    code, name = parcel.code, parcel.name
+    await db.delete(parcel)
+    await db.commit()
+    return ParcelDeleteResponse(deleted_id=parcel_id, code=code, name=name)
 
 
 @router.get("/parcels/{parcel_id}", response_model=ParcelDetailResponse)

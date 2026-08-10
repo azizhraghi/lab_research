@@ -1,7 +1,168 @@
 # Session handoff — "make the platform actually work"
 
-Last updated: 2026-08-09. Keep this file current at the end of every session so a
+Last updated: 2026-08-10. Keep this file current at the end of every session so a
 fresh session can resume without replaying the whole conversation.
+
+## 2026-08-10 (latest) — ORCID publications ETL + parcel delete
+
+Two features, both chosen by the user after an audit of the cahier des charges.
+Operation count **71 → 74**.
+
+**The audit finding that drove this: `biblio_publications` had no writer
+anywhere in application code.** The only `Publication(...)` insert was
+`seed_dev.py:125` (fabricated ML papers). `run_sync_for_researcher` writes only
+`BiblioIndicator` rows; the `Publication` at `agent.py:469` is the pydantic class
+from `agent.py:47` belonging to the legacy JSON store, not the ORM model.
+`download_cv_pdf` queries that table at `router.py:60`, so **every CV ever
+generated claimed the researcher had no publications.** ORCID sync is now the
+table's first real writer.
+
+`agents/bibliometrie/services/orcid_sync.py` was dead code (imported nowhere,
+referenced only in `implementation_plan.md`); rewritten and wired.
+`scholar_sync.py` is still dead — same shape, next candidate.
+
+Backend: `orcid_sync.py` (rewritten), `publication_sync.py` (new),
+`schemas.py` (+`OrcidSyncResponse`), `router.py` (+2 routes),
+`cv_generator.py` (`_Pub`/`_MinimalResearcher` promoted to module level).
+Frontend: `OrcidSyncResult` in `types.ts`, `useResearcherPublications` /
+`useSyncPublications` in `api/biblio.ts`, `ResearcherPublicationsModal`
+(`App.tsx:1333`) behind a new "Publications" button on each researcher card.
+
+**Two ORCID API shape facts, verified live before coding** — the pre-existing
+parser got both wrong:
+
+- **`group` is already deduplicated.** ORCID clusters the same work asserted by
+  several sources into one group holding multiple `work-summary` entries. Group 0
+  of the Carberry record carried the same title twice (Crossref + the author).
+  Iterate groups, take `summaries[0]`; iterating summaries double-counts.
+- **Nulls are present-with-null, not absent.** `publication-date`,
+  `journal-title`, `title.title` and `url` all exist with `None` values, so
+  `dict.get(k, {})` returns `None` and a chained `.get()` raises
+  `AttributeError`. Hence `_dig`/`_value`, which tolerate `None` at any level.
+
+Design decisions worth keeping:
+
+- **DOI is the dedup key, normalised** (lowercase, strip `https://doi.org/`,
+  `http://doi.org/`, `doi:`, trailing `/`). Necessary because `Publication.doi`
+  is `unique=True` and the same paper arrives as `10.1234/ABC` and
+  `https://doi.org/10.1234/abc` from different asserting sources. Verified:
+  `https://doi.org/10.1109/TPS.1987.4316723` → `10.1109/tps.1987.4316723`.
+- **Co-authorship is a link, not a copy.** Publications are shared rows;
+  authorship lives in `biblio_researcher_publications` (composite PK). Two
+  co-authors syncing one paper → one publication row, two links.
+- **`citation_count` is never written by ORCID sync.** ORCID reports no
+  citations; writing 0 would destroy Scopus/Scholar data. `_enrich` only fills
+  columns currently `None`.
+- **`author_position` is left `None`.** ORCID work summaries do not expose
+  author order, and inventing `1` would assert first authorship.
+- **`OrcidUnavailable` → 400, not 500.** The request was well-formed; the
+  upstream record is the problem. Distinguishes an outage from "no works".
+
+Verified live against the real public API (no key required), then all rows
+removed — DB back to 1 researcher / 0 publications / 1 parcel:
+
+| Check | Result |
+|---|---|
+| First sync (`0000-0002-1825-0097`) | 6 works → 6 created, 6 links |
+| Re-sync | 0 created, 6 already present — exactly idempotent |
+| Co-author, distinct iD, shared DOI | 1 created, 1 enriched, **2 links** |
+| No ORCID on file / nonexistent iD | 400, message names researcher / iD |
+| Unknown researcher (both routes) | 404, so `[]` means "no publications" |
+| CV PDF | 200, 2,989 bytes, real `%PDF-` |
+| Parcel delete with 1 child | 409 "still has 1 sensor readings" |
+| Parcel delete once clean | 200, then GET 404 |
+
+**`twin_parcels` has six child tables, not the five this file previously
+claimed** — `twin_simulations` (`SimulationScenario`) was missing from the
+Pending #1 note. `delete_parcel` counts all six, most-precious-first, and
+refuses rather than cascading so field measurements cannot be lost by mistake.
+
+**Two traps for the next session:**
+
+- **This FastAPI version does not flatten included routers into `app.routes`** —
+  they stay as lazy `_IncludedRouter` wrappers, so counting `app.routes` reports
+  5 and looks catastrophically broken. Count operations via
+  `app.openapi()["paths"]` instead.
+- **`biblio_researchers.orcid_id` is `unique=True`**, so two researchers cannot
+  share an iD (correct — an iD identifies one person). Testing the co-author
+  path needs two *distinct* iDs sharing a DOI, not one iD twice.
+
+Git identity was `medaz <medaz@example.com>`; the user's real identity is
+`azizhraghi <azizhraghi@gmail.com>`. Set repo-locally (`git config user.*`).
+The four commits before this session are authored `medaz` and are **unpushed** —
+see Pending #1 if the user wants that history reattributed.
+
+## 2026-08-09 (latest) — calibration: the water workflow is now complete
+
+Pending #1 is **done**, and with it the whole water loop is reachable from the
+UI: enter readings → log irrigation → fit a calibration → review it → apply it.
+Both routes already existed; this session wired them, so the operation count
+stays at 71. `CalibrationPanel` (`App.tsx:2882`, rendered at `:3429`) plus
+`useCalibrations` / `useRunCalibration` / `useApplyCalibration` in
+`frontend/src/api/digitaltwin.ts` and `CalibrationProfile` in `types.ts`. A new
+`Stat` primitive (`App.tsx:301`) is shared by the result grids — reuse it.
+
+**The fitter was checked for parameter recovery, not for HTTP 200.** Readings
+were generated forward from a known `kc`/`field_capacity` using the same water
+balance the calibrator fits, so a correct fit has to return those numbers back.
+`make_field_csv.py` (repo root, committed) builds that fixture and prints its own
+ground truth; it is a test generator, not measurements — the header says so. The
+CSV it writes is gitignored, being regenerable. Re-verified after the final edit
+to the generator: import 21/21, then a run returned **kc 1.14, fc 126.0, RMSE
+0.0** over 20 validation days — exactly the seeded truth.
+
+Two findings that change how the result should be read:
+
+- **Field capacity is only identifiable if the soil actually saturates in the
+  window.** The first fit recovered `kc` exactly (RMSE 0.0) but left fc at the
+  parcel default. That is not a bug: with no reading at capacity, every
+  candidate above the wettest observation predicts identically, and the strict
+  `<` at `calibration.py:105` keeps the lowest grid value. Adding saturating
+  rain recovered **both** exactly (kc 1.14, fc 126.0). The panel says which of
+  the two the window can support rather than implying a blanket "calibrated".
+  Caveat worth keeping: a profile does not store the readings it was fitted on,
+  so the UI re-derives this from readings that exist *now*.
+- **Apply is asymmetric, and the asymmetry is unhelpful.** `apply` writes back
+  only `field_capacity_mm` (`calibration.py:173-176`) — the parameter most often
+  *un*identified — and leaves crop type and wilting point alone. The fitted crop
+  coefficient reaches simulation and optimisation through
+  `get_active_crop_coefficient`, but **never `/recommend`**, which still reads
+  the static `CROP_COEFFICIENTS` table. So calibrating does not change the
+  headline irrigation figure. The UI states both paths explicitly.
+
+**Silent multi-sensor data loss found.** Two sensors reporting at identical
+timestamps produced a suspiciously perfect fit: `calibration.py:61-64` keeps one
+reading per calendar day using a strict `>`, so equal timestamps resolve by
+insertion order and the other sensor's entire series is discarded without a
+word. Surfaced as an amber `duplicateDays` warning in the panel, since a second
+sensor otherwise looks like it should improve the fit.
+
+Verified live on :8013, then every row removed (all four twin tables back to 0
+except `twin_parcels` at 1, and the parcel restored to `field_capacity_mm`
+120.0):
+- Apply moved the parcel 120.0 → **126.0**; `wilting_point_mm` 45.0 and
+  `crop_type` wheat untouched. Statuses went candidate → applied, with the two
+  older profiles marked superseded.
+- Re-applying → 400 "Only a candidate calibration profile can be applied".
+  Unknown profile → 400 "Calibration profile not found". `reviewed_by: "A"` →
+  422 (`min_length=2`).
+- `min_observations` 30 against 21 readings → 400 carrying the message to show
+  verbatim ("Demo, unknown, and synthetic readings are intentionally excluded").
+  6 and 366 → 422. Run against a missing parcel → 404.
+- **`GET /parcels/999/calibrations` → `[]` with HTTP 200** — same missing
+  existence check as `list_irrigation_events`. Third route with this shape now.
+- Role gate confirmed end to end: researcher runs but **cannot** apply (403
+  "Your laboratory role does not permit this operation."); reviewer and
+  administrator do both; viewer is denied both.
+
+Trap when hand-testing: **apply the profile you just fitted.** Applying an older
+id leaves the parcel unchanged and looks like the write-back is broken. Re-list
+before targeting an id — and note the CSV upsert key includes `sensor_code`, so
+changing the sensor code in the fixture creates a parallel series instead of
+updating the old one (this is how the duplicate-day case was found).
+
+Typecheck and build clean (2317 modules, JS 1,053.02 kB / gzip 280.30 kB, the
+only warning Vite's pre-existing >500 kB advisory).
 
 ## 2026-08-09 (later still) — irrigation logging: what was applied, not advised
 
@@ -345,59 +506,88 @@ All in `frontend/src/app/App.tsx` unless stated otherwise.
 
 Ordered by value to LRSTE, not by effort. Previously-listed items now **done**:
 MIS sub-resource create hooks, `searchSuggestions`, the ArXiv/PubMed/Scopus
-fetchers, pgvector dedup, the sensor-reading ingestion UI, and (2026-08-09)
-the reading-delete route plus the irrigation-event log.
+fetchers, pgvector dedup, the sensor-reading ingestion UI, the reading-delete
+route, the irrigation-event log, the calibration UI (2026-08-09), and the ORCID
+publications ETL + parcel delete (2026-08-10). With calibration wired, **the
+digital-twin water workflow is complete**; the items below are elsewhere in the
+platform.
 
-1. **Calibration is the last unreachable step of the water workflow.**
-   `/parcels/{id}/calibrations/run` + `/calibrations/{profile_id}/apply` fit this
-   parcel's real field capacity and crop coefficient instead of the defaults.
-   The route exists and irrigation logging now feeds it; only the UI is missing.
-   Note the run gate is stricter than a count: `services/calibration.py:66-73`
-   needs one reading for **every calendar day** across the window — flagged
-   exactly `ok`, `data_origin` in {field, field_import}, at least 14 of them, and
-   **no gaps**. The ingestion UI produces eligible rows; a user still has to
-   collect an unbroken run before a run will do anything but 400. Two roles are
-   involved by design — a researcher runs the candidate, a *reviewer or
-   administrator* applies it (`router.py:418-422`), so the UI needs to show a
-   pending candidate's fitted values before anyone commits them.
-2. **Still no delete/edit on anything else.** The reading route above is the only
-   non-MIS delete. There is still no `DELETE /api/veille/sources/{id}` and no
-   `PUT`/`DELETE` on researchers or parcels — and a parcel delete needs a
-   decision on its children (readings, forecasts, irrigation events,
-   calibrations, recommendations all FK to `twin_parcels` with no cascade
-   configured, so a naive delete will fail or orphan rows). Follow the pattern
-   set by the reading route: scope child lookups to the parent, and return what
-   the caller needs to know rather than a bare message.
-3. **Remove the legacy JSON profile system.** `/api/biblio/profiles/*` (6
+1. **Four unpushed commits are authored `medaz <medaz@example.com>`**
+   (`681ae05`, `7f40b74`, `d91e14f`, `c142486`) — not the user's identity.
+   Repo-local `user.name`/`user.email` are now `azizhraghi
+   <azizhraghi@gmail.com>`, so new commits are correct, but those four are not.
+   Because they are unpushed, `git rebase --root --exec 'git commit --amend
+   --reset-author --no-edit'` (or a filter-branch over that range) can still fix
+   them without a force-push. Ask before rewriting.
+2. **Still no delete/edit on most things.** Readings and parcels now have
+   deletes; there is still no `DELETE /api/veille/sources/{id}` and no
+   `PUT`/`DELETE` on researchers. Follow the pattern now set twice: scope child
+   lookups to the parent, refuse with 409 + counts rather than cascading, and
+   return what the caller needs to know rather than a bare message.
+3. **`scholar_sync.py` is dead code**, exactly as `orcid_sync.py` was — imported
+   nowhere. Now that the publication upsert service exists
+   (`services/publication_sync.py`), wiring Scholar publications is mostly
+   reusing `upsert_works_for_researcher` with a different extractor. Scopus
+   likewise returns only metrics today.
+4. **`download_cv_pdf` writes `tmp_cv_{id}.pdf` to the repo root and never
+   deletes it**, and it is not gitignored. Harmless until now; the CV route
+   produces something genuinely useful as of this session, so it will be hit
+   more often. Use a `tempfile.NamedTemporaryFile` + `BackgroundTask` cleanup.
+5. **Three list routes skip the parent-existence check** and return `[]` with
+   HTTP 200 for a parcel that does not exist: `list_irrigation_events`,
+   `list_calibrations`, and `GET /readings`. The two new biblio routes 404
+   correctly — copy that. Cheap to fix together, and worth doing before
+   anything builds on "empty means no data".
+6. **`/recommend` ignores the calibrated crop coefficient.** It reads the static
+   `CROP_COEFFICIENTS` table while simulation and optimisation go through
+   `get_active_crop_coefficient`. Applying a calibration therefore does not move
+   the number the user actually looks at. Either route `/recommend` through the
+   active profile or state the split in the API docs — but the current
+   half-and-half is the kind of thing that quietly discredits the feature.
+7. **Remove the legacy JSON profile system.** `/api/biblio/profiles/*` (6
    endpoints, `agents/bibliometrie/router.py:97-139`) is a parallel researcher
    store from pre-merge code, backed by the now-gitignored `data/researchers.json`
    of fabricated profiles. The DB-backed `/api/biblio/researchers` is the real one.
-4. **`@app.on_event("startup")` is deprecated** (`api/main.py:46`) — migrate to a
+8. **`@app.on_event("startup")` is deprecated** (`api/main.py:46`) — migrate to a
    FastAPI lifespan handler.
-5. **InMemory bus dispatches synchronously** inside the publisher's coroutine
+9. **InMemory bus dispatches synchronously** inside the publisher's coroutine
    (`shared/event_bus.py:118`). Bibliometrie's Scholar call + PDF regeneration run
    *inside the HTTP request that triggered the scrape* — a request-timeout bug, not
    just a scaling note. Redis publish failures are also swallowed silently
    (`:56-58`, returns `""`), so `EVENT_BUS_TYPE=redis` without Redis running means
    agents stop communicating with no error anywhere.
-6. **Audit the veille/biblio router auth comments** before any deployment: two
-   endpoints carry "No auth required for dev testing" despite the global
-   `Depends(get_current_user)`. Confirm `DISABLE_AUTH=false` in prod — it returns
-   an `administrator` stub to every caller.
-7. **Celery decision:** `celery>=5.4.0` is still in `requirements/base.txt` with no
-   Celery app (the dead `tasks.py` files are now deleted). Stand up a real worker
-   or drop the dependency.
-8. **Dependencies are unpinned** (`>=` throughout, no lockfile) — builds are not
-   reproducible across machines.
-9. **Scope-honesty pass:** simulation is a FAO-56 water-balance bucket (not
-   SWAT/HEC-HMS/EPANET); optimisation is a constrained greedy scheduler (not
-   Bayesian/GA). Both are legitimate, useful tools for irrigation scheduling —
-   recommend relabelling the cahier des charges rather than promising engines the
-   lab likely does not need. Relabelling is a day; real engines are months.
-10. **MIS/DigitalTwin/Simulation/Optimisation subscribe to nothing**
+10. **Audit the veille/biblio router auth comments** before any deployment: two
+    endpoints carry "No auth required for dev testing" despite the global
+    `Depends(get_current_user)`. Confirm `DISABLE_AUTH=false` in prod — it returns
+    an `administrator` stub to every caller.
+11. **Celery decision:** `celery>=5.4.0` is still in `requirements/base.txt` with no
+    Celery app (the dead `tasks.py` files are now deleted). Stand up a real worker
+    or drop the dependency.
+12. **Dependencies are unpinned** (`>=` throughout, no lockfile) — builds are not
+    reproducible across machines.
+13. **Scope-honesty pass:** simulation is a FAO-56 water-balance bucket (not
+    SWAT/HEC-HMS/EPANET); optimisation is a constrained greedy scheduler (not
+    Bayesian/GA). Both are legitimate, useful tools for irrigation scheduling —
+    recommend relabelling the cahier des charges rather than promising engines the
+    lab likely does not need. Relabelling is a day; real engines are months.
+    **Confirmed 2026-08-10:** zero matches for EPANET/HEC-HMS/SWAT/WEAP/MODFLOW
+    in any `.py`; no `wntr`, no `flopy`, not even a stub. FAO-56 is the only
+    engine present — which is one of the four the cahier's own line 95 names,
+    and the right one for *parcelles irriguées*. Of the three promised twin
+    domains only that one exists (no *bassin versant*, no *réseaux hydrauliques*).
+14. **MIS/DigitalTwin/Simulation/Optimisation subscribe to nothing**
     (`_setup_subscriptions` is `pass`). They are REST-only services, so creating a
     project does not auto-create a parcel or trigger a run. The "multi-agent" claim
     holds for 4 of 8 agents.
+15. **No anomaly detection exists anywhere**, though the cahier requires it of the
+    Ingestion IoT agent. `quality_flag` is stored on every reading and never
+    computed from anything.
+16. **`agents/mis/agent.py` is 37 lines whose only behaviour is `print()`.** None
+    of the cahier's MIS automations (reminders, budget-vs-deliverable checks,
+    reports, insights) exist. The MIS *router* is real and useful; the agent is
+    not.
+17. **Orchestrator history is in-memory** and wiped on restart, so it is not an
+    audit trail despite being presented as one.
 
 ## Standing principle
 

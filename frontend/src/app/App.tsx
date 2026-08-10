@@ -26,7 +26,13 @@ import { useAuth } from "../auth/AuthContext";
 import type { Article, Researcher as ApiResearcher, HistoriqueEvenement, Projet, Personnel, Equipement, Parcel, ParcelDetail, SensorReadingFull, CalibrationProfile } from "../api/types";
 import { API_BASE_URL } from "../lib/apiClient";
 import { useArticles, useTriggerScrape, useSources, useCreateSource } from "../api/veille";
-import { useResearchers, useSyncResearcher, useCreateResearcher } from "../api/biblio";
+import {
+  useResearchers,
+  useSyncResearcher,
+  useCreateResearcher,
+  useResearcherPublications,
+  useSyncPublications,
+} from "../api/biblio";
 import { useProjets, useCreateProjet, usePersonnels, useEquipements, useBudgets,
          useCreatePersonnel, useCreateEquipement, useCreateBudget, useDeleteProjet } from "../api/mis";
 import { useQualiteStatus, useRapports, useValiderEntite, type QualiteEntite } from "../api/qualite";
@@ -1322,10 +1328,169 @@ function NewResearcherForm({ onDone }: { onDone: () => void }) {
   );
 }
 
+function ResearcherPublicationsModal({
+  researcher,
+  onClose,
+}: {
+  researcher: ApiResearcher | null;
+  onClose: () => void;
+}) {
+  const publications = useResearcherPublications(researcher?.id ?? null);
+  const syncPublications = useSyncPublications();
+
+  // The ORCID iD is what makes the import possible at all, so the absence of
+  // one is stated up front rather than left to a 400 after the user clicks.
+  const orcid = researcher?.orcid_id?.trim();
+  const rows = publications.data ?? [];
+  const result = syncPublications.data;
+
+  return (
+    <Modal
+      open={researcher !== null}
+      onClose={onClose}
+      title={researcher ? `Publications — ${researcher.name}` : "Publications"}
+      subtitle="Imported from the public ORCID record · GET /api/biblio/researchers/{id}/publications"
+    >
+      <div className="space-y-4">
+        <div className="flex items-start justify-between gap-4">
+          <div className="text-xs text-muted-foreground">
+            {orcid ? (
+              <>
+                ORCID{" "}
+                <a
+                  href={`https://orcid.org/${orcid}`}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="text-primary font-semibold hover:underline"
+                >
+                  {orcid}
+                </a>
+              </>
+            ) : (
+              <span className="text-amber-600">
+                No ORCID iD on this profile — add one to import publications.
+              </span>
+            )}
+          </div>
+          <button
+            onClick={() => researcher && syncPublications.mutate(researcher.id)}
+            disabled={!orcid || syncPublications.isPending}
+            className="flex items-center gap-2 px-3 py-2 text-xs font-semibold rounded-xl bg-primary text-primary-foreground shadow-lg shadow-primary/20 hover:opacity-90 transition-all duration-200 disabled:opacity-40 disabled:cursor-not-allowed shrink-0"
+          >
+            {syncPublications.isPending ? (
+              <Loader2 size={14} className="animate-spin" />
+            ) : (
+              <Download size={14} />
+            )}
+            Import from ORCID
+          </button>
+        </div>
+
+        {syncPublications.isError && (
+          <div className="flex items-start gap-2 p-3 bg-red-50 border border-red-200 rounded-xl text-xs text-red-700">
+            <AlertCircle size={14} className="shrink-0 mt-0.5" />
+            <span className="break-words">
+              {(syncPublications.error as Error).message}
+            </span>
+          </div>
+        )}
+
+        {result && (
+          <div className="flex items-start gap-2 p-3 bg-emerald-50 border border-emerald-200 rounded-xl text-xs text-emerald-700">
+            <CheckCircle2 size={14} className="shrink-0 mt-0.5" />
+            <span>
+              ORCID holds {result.works_found} works
+              {" · "}
+              {result.publications_created} new to the lab
+              {" · "}
+              {result.links_created} newly linked to this researcher
+              {result.links_already_present > 0 &&
+                ` · ${result.links_already_present} already on file`}
+              {result.publications_enriched > 0 &&
+                ` · ${result.publications_enriched} enriched`}
+            </span>
+          </div>
+        )}
+
+        {publications.isLoading && (
+          <div className="flex items-center justify-center py-10 text-muted-foreground text-sm">
+            <RefreshCw size={16} className="animate-spin mr-2" />
+            Loading publications…
+          </div>
+        )}
+
+        {publications.isError && (
+          <div className="flex items-center gap-2 p-4 bg-red-500/10 border border-red-500/30 rounded-xl text-sm text-red-500">
+            <AlertCircle size={16} />
+            {(publications.error as Error).message}
+          </div>
+        )}
+
+        {!publications.isLoading && !publications.isError && rows.length === 0 && (
+          <div className="bg-muted/40 border border-border rounded-xl p-6 text-center">
+            <BookOpen size={22} className="mx-auto text-muted-foreground mb-2" />
+            <p className="text-sm font-semibold text-foreground">
+              No publications on file
+            </p>
+            <p className="text-xs text-muted-foreground mt-1">
+              {orcid
+                ? "Import from ORCID to populate this list."
+                : "Add an ORCID iD to this profile, then import."}
+            </p>
+          </div>
+        )}
+
+        {rows.length > 0 && (
+          <div className="space-y-2 max-h-[46vh] overflow-y-auto pr-1">
+            <p className="text-xs text-muted-foreground">
+              {rows.length} publication{rows.length === 1 ? "" : "s"}, newest first
+            </p>
+            {rows.map((p) => (
+              <div
+                key={p.id}
+                className="border border-border rounded-xl p-3 hover:bg-secondary/40 transition-colors"
+              >
+                <p className="text-sm font-semibold text-foreground leading-snug">
+                  {p.title}
+                </p>
+                <p className="text-xs text-muted-foreground mt-1">
+                  {[p.journal, p.year ?? "year unknown"]
+                    .filter(Boolean)
+                    .join(" · ")}
+                  {p.type ? ` · ${p.type}` : ""}
+                </p>
+                <div className="flex items-center gap-3 mt-1.5">
+                  {p.doi ? (
+                    <a
+                      href={`https://doi.org/${p.doi}`}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="text-[11px] text-primary font-medium hover:underline inline-flex items-center gap-1"
+                    >
+                      {p.doi}
+                      <ExternalLink size={10} />
+                    </a>
+                  ) : (
+                    <span className="text-[11px] text-muted-foreground">no DOI</span>
+                  )}
+                  <span className="text-[11px] text-muted-foreground">
+                    via {p.source}
+                  </span>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </Modal>
+  );
+}
+
 function ResearchersPage() {
   const { data: researchers, isLoading, error, refetch } = useResearchers();
   const sync = useSyncResearcher();
   const [creating, setCreating] = useState(false);
+  const [viewing, setViewing] = useState<ApiResearcher | null>(null);
 
   return (
     <div className="p-6 space-y-5 overflow-y-auto h-full scrollbar-hide">
@@ -1356,6 +1521,11 @@ function ResearchersPage() {
         subtitle="Stored by the bibliometric agent · POST /api/biblio/researchers">
         <NewResearcherForm onDone={() => setCreating(false)} />
       </Modal>
+
+      <ResearcherPublicationsModal
+        researcher={viewing}
+        onClose={() => setViewing(null)}
+      />
 
       {isLoading && (
         <div className="flex items-center justify-center py-20 text-muted-foreground text-sm">
@@ -1441,6 +1611,12 @@ function ResearchersPage() {
               </div>
 
               <div className="flex gap-2 mt-4">
+                <button
+                  onClick={() => setViewing(r)}
+                  className="flex-1 py-1.5 bg-secondary text-foreground text-xs font-semibold rounded-xl hover:bg-primary hover:text-white transition-colors text-center"
+                >
+                  Publications
+                </button>
                 <a
                   href={`${API_BASE_URL}/api/biblio/researchers/${r.id}/cv/pdf`}
                   target="_blank"
