@@ -44,15 +44,21 @@ async def get_historique() -> list:
 
 @router.post("/trigger")
 async def trigger_event(event: dict) -> dict:
-    """Manually route an event; useful for controlled demonstrations."""
+    """Manually inject an event onto the bus.
+
+    Publishes to the fanout stream rather than calling handle_event directly,
+    so a manual trigger exercises the identical path a real event takes —
+    every subscribed agent (bibliometrie, qualite, digital twin, this
+    orchestrator) reacts, not just the orchestrator.
+    """
     evt = Event(
         id=event.get("id", "manual"),
         type=event.get("type", "unknown"),
         source_agent=event.get("source_agent", "api"),
         payload=event.get("payload", {}),
     )
-    await orchestrator_agent.handle_event(evt)
-    return {"message": f"Event '{evt.type}' routed."}
+    await orchestrator_agent.emit_event("events", evt)
+    return {"message": f"Event '{evt.type}' published to the bus."}
 
 
 @router.patch("/alertes/{alerte_id}/resoudre")

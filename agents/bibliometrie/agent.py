@@ -5,19 +5,16 @@ OVERWRITTEN with Friend 1's richer version (16.8KB, 4x larger).
 Adapted to use the monorepo's shared BaseAgent, schemas, and imports.
 """
 from __future__ import annotations
-from typing import Any, Dict, List, Optional
+from typing import Any, List, Optional
 from datetime import datetime, timezone
 import os
 import inspect
-import json
 import requests
 
 from shared.base_agent import BaseAgent
 from shared.schemas import Event, AgentAction, ActionResult
-from agents.bibliometrie.services.cv_generator import generate_cv
 from agents.bibliometrie.services.scopus_sync import fetch_scopus_metrics as _fetch_scopus_metrics_raw
 
-RESEARCHERS_FILE = "data/researchers.json"
 SCRAPERAPI_KEY_ENV_VARS = ("SCRAPERAPI_KEY", "SCHOLAR_SCRAPERAPI_KEY")
 SEMANTIC_SCHOLAR_AUTHOR_SEARCH_URL = "https://api.semanticscholar.org/graph/v1/author/search"
 OPENALEX_AUTHOR_SEARCH_URL = "https://api.openalex.org/authors"
@@ -38,42 +35,28 @@ else:
     SCHOLARLY_IMPORT_ERROR = None
 
 
-# ── Pydantic schemas for bibliometrie (from Friend 1) ─────────────────
+# ── Pydantic bridge profile ───────────────────────────────────────────
+#
+# This is NOT a storage model: it is the transient profile the metric fetchers
+# (Scholar → Scopus → Semantic Scholar → OpenAlex) mutate in place before
+# run_sync_for_researcher writes the values back to BiblioIndicator rows.
+# Storage lives in agents/bibliometrie/models.py (the DB models).
 
 from pydantic import BaseModel, Field
 from uuid import uuid4
 
 
-class Publication(BaseModel):
-    """Represents a single publication linked to a researcher."""
-    id: str
-    title: str
-    topic: str
-    source: str
-    discovered_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-
-
 class Researcher(BaseModel):
-    """Represents a lab researcher with their profile and metrics."""
+    """Fetch-session profile for one researcher."""
     id: str = Field(default_factory=lambda: str(uuid4()))
     name: str
     email: Optional[str] = None
     orcid: Optional[str] = None
     google_scholar_id: Optional[str] = None
     scopus_id: Optional[str] = None
-    publications: List[Publication] = []
     h_index: Optional[int] = None
     citation_count: Optional[int] = None
-    topics: List[str] = []
     last_updated: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-
-
-class ResearcherCreate(BaseModel):
-    """Schema for creating a new researcher — only name is required."""
-    name: str
-    email: Optional[str] = None
-    orcid: Optional[str] = None
-    google_scholar_id: Optional[str] = None
 
 
 # ── Helper functions (from Friend 1) ─────────────────────────────────
@@ -184,8 +167,6 @@ class BibliometrieAgent(BaseAgent):
 
     def __init__(self):
         super().__init__()
-        self._researchers: Dict[str, Researcher] = {}
-        self._load_researchers()
         self._setup_scholar_proxy()
 
     def _setup_scholar_proxy(self) -> None:
@@ -208,53 +189,11 @@ class BibliometrieAgent(BaseAgent):
         except Exception as e:
             print(f"[{self.name}] Proxy setup failed: {e}")
 
-    def _load_researchers(self) -> None:
-        if os.path.exists(RESEARCHERS_FILE):
-            with open(RESEARCHERS_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                for name, profile in data.items():
-                    self._researchers[name] = Researcher(**profile)
-            print(f"[{self.name}] Loaded {len(self._researchers)} researcher profiles")
-        else:
-            print(f"[{self.name}] No existing profiles found — starting fresh")
-
-    def _save_researchers(self) -> None:
-        os.makedirs(os.path.dirname(RESEARCHERS_FILE), exist_ok=True)
-        data = {}
-        for name, researcher in self._researchers.items():
-            data[name] = researcher.model_dump(mode="json")
-        with open(RESEARCHERS_FILE, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2, ensure_ascii=False)
-
-    def _regenerate_cv(self, researcher: Researcher) -> None:
-        os.makedirs("cvs", exist_ok=True)
-        filename = researcher.name.replace(" ", "_").lower()
-        output_path = f"cvs/{filename}_cv.pdf"
-        generate_cv(researcher, output_path)
-
-    # ── Public API methods ────────────────────────────────────────────
-
-    def add_researcher(self, name: str, email: str = None,
-                       orcid: str = None, google_scholar_id: str = None) -> Researcher:
-        researcher = Researcher(name=name, email=email, orcid=orcid, google_scholar_id=google_scholar_id)
-        self._researchers[name] = researcher
-        self._save_researchers()
-        print(f"[{self.name}] Added researcher: {name}")
-        return researcher
-
-    def get_researcher(self, name: str) -> Researcher | None:
-        return self._researchers.get(name)
-
-    def list_researchers(self) -> List[Researcher]:
-        return list(self._researchers.values())
-
-    def _match_researcher(self, authors: str) -> List[Researcher]:
-        matched = []
-        authors_lower = authors.lower()
-        for name, researcher in self._researchers.items():
-            if researcher.name.lower() in authors_lower:
-                matched.append(researcher)
-        return matched
+    # ── JSON profile store (removed 2026-08-21) ────────────────────────
+    # _load/_save_researchers, add/get/list_researcher, _match_researcher,
+    # _regenerate_cv and update_all_metrics backed /api/biblio/profiles/*, a
+    # parallel researcher store over a gitignored JSON file of fabricated
+    # profiles. The DB-backed /researchers routes are the real ones.
 
     # ── Scholarly metrics fetching (multi-source fallback) ────────────
 
@@ -377,14 +316,6 @@ class BibliometrieAgent(BaseAgent):
 
         return researcher
 
-    def update_all_metrics(self) -> None:
-        print(f"[{self.name}] Updating metrics for {len(self._researchers)} researchers...")
-        for name, researcher in self._researchers.items():
-            updated = self.fetch_scholar_metrics(researcher)
-            self._researchers[name] = updated
-        self._save_researchers()
-        print(f"[{self.name}] Metrics update complete!")
-
     # ── DB-backed sync (router endpoint POST /api/biblio/researchers/{id}/sync)
     #
     # The router and the (now removed) Celery task both called this method, but
@@ -459,34 +390,60 @@ class BibliometrieAgent(BaseAgent):
     # ── Event handling ────────────────────────────────────────────────
 
     async def _handle_article_discovered(self, event: Event) -> None:
-        payload = event.payload
-        authors = payload.get("authors", "")
-        matched = self._match_researcher(authors)
+        """Link a veille-collected article to the lab researchers who wrote it.
 
-        if not matched:
+        The pre-merge version appended to the JSON profile store nobody read.
+        Now: an article carrying a DOI whose author list matches DB researchers
+        becomes a real biblio_publications row (source="veille") linked through
+        the same upsert the ORCID/Scholar imports use — DOI-normalised,
+        idempotent, rows shared across co-authors. Articles without a DOI are
+        skipped: an RSS title is not bibliographic evidence.
+        """
+        payload = event.payload
+        doi = payload.get("doi")
+        title = (payload.get("title") or "").strip()
+        if not doi or not title:
+            return
+        authors = {a for a in (payload.get("authors") or []) if a}
+        if not authors:
             return
 
-        publication = Publication(
-            id=payload.get("paper_id", ""),
-            title=payload.get("title", ""),
-            topic=payload.get("topic", "unknown"),
-            source=payload.get("source", "unknown"),
+        from sqlalchemy import select as _sa_select
+        from shared.database import AsyncSessionLocal
+        from agents.bibliometrie.models import Researcher as ResearcherModel
+        from agents.bibliometrie.services.orcid_sync import normalise_doi
+        from agents.bibliometrie.services.publication_sync import (
+            upsert_works_for_researcher,
         )
 
-        for researcher in matched:
-            existing_ids = [p.id for p in researcher.publications]
-            if publication.id in existing_ids:
-                continue
+        author_keys = {_normalize_name(a) for a in authors}
+        work = {
+            "title": title,
+            "year": None,
+            "type": "article",
+            "journal": None,
+            "doi": normalise_doi(doi),
+            "source": "veille",
+        }
 
-            researcher.publications.append(publication)
-            if publication.topic not in researcher.topics:
-                researcher.topics.append(publication.topic)
-            researcher.last_updated = datetime.now(timezone.utc)
-            print(f"[{self.name}] Updated {researcher.name}: +1 publication ({publication.title[:50]})")
-
-        self._save_researchers()
-        for researcher in matched:
-            self._regenerate_cv(researcher)
+        async with AsyncSessionLocal() as db:
+            researchers = (
+                await db.execute(_sa_select(ResearcherModel))
+            ).scalars().all()
+            matched = [
+                r for r in researchers if _normalize_name(r.name) in author_keys
+            ]
+            if not matched:
+                return
+            for researcher in matched:
+                result = await upsert_works_for_researcher(
+                    db, researcher, [work], source="veille"
+                )
+                if result["links_created"] or result["publications_created"]:
+                    print(
+                        f"[{self.name}] Veille article linked to {researcher.name}: "
+                        f"{title[:60]}"
+                    )
 
     async def _setup_subscriptions(self):
         # Subscribe to the fanout stream and route article-discovery events to
