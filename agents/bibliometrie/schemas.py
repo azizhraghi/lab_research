@@ -85,6 +85,20 @@ class ResearcherBase(BaseModel):
 class ResearcherCreate(ResearcherBase):
     pass
 
+class ResearcherUpdate(BaseModel):
+    """Partial update — only the fields present in the payload change."""
+    name: Optional[str] = None
+    email: Optional[str] = None
+    orcid_id: Optional[str] = None
+    scholar_id: Optional[str] = None
+    scopus_id: Optional[str] = None
+    department: Optional[str] = None
+    role: Optional[str] = None
+
+class ResearcherDeleteResponse(BaseModel):
+    deleted_id: int
+    name: str
+
 class ResearcherResponse(ResearcherBase):
     id: int
     indicators: List[IndicatorResponse] = []

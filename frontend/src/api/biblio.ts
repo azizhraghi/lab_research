@@ -5,6 +5,7 @@ import type {
   Publication,
   Researcher,
   ResearcherCreate,
+  ResearcherUpdate,
   ScholarSyncResult,
 } from "./types";
 
@@ -31,6 +32,33 @@ export function useCreateResearcher() {
       apiFetch<Researcher>("/api/biblio/researchers", {
         method: "POST",
         body: JSON.stringify(body),
+      }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["biblio", "researchers"] }),
+  });
+}
+
+/** Partial update — only the fields present in the body change. A UNIQUE
+ * collision (email or an external id) comes back as a 409 naming the field. */
+export function useUpdateResearcher() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, ...body }: ResearcherUpdate & { id: number }) =>
+      apiFetch<Researcher>(`/api/biblio/researchers/${id}`, {
+        method: "PUT",
+        body: JSON.stringify(body),
+      }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["biblio", "researchers"] }),
+  });
+}
+
+/** Delete a researcher. The server refuses with 409 while publications remain
+ * linked, so the error message is what the user needs to read. */
+export function useDeleteResearcher() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: number) =>
+      apiFetch<{ deleted_id: number; name: string }>(`/api/biblio/researchers/${id}`, {
+        method: "DELETE",
       }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["biblio", "researchers"] }),
   });

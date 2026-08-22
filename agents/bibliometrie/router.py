@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, func, delete
 from sqlalchemy.orm import selectinload
 from typing import List
 
@@ -8,7 +8,7 @@ from shared.database import get_db
 from shared.security import require_roles
 from agents.bibliometrie.models import Researcher, Publication, BiblioIndicator, CVProfile, ResearcherPublication
 from agents.bibliometrie.schemas import (
-    ResearcherCreate, ResearcherResponse,
+    ResearcherCreate, ResearcherResponse, ResearcherUpdate, ResearcherDeleteResponse,
     PublicationResponse, CVProfileResponse, OrcidSyncResponse, ScholarSyncResponse
 )
 from agents.bibliometrie.services.orcid_sync import OrcidUnavailable
@@ -41,6 +41,96 @@ async def list_researchers(db: AsyncSession = Depends(get_db)):
     )
     result = await db.execute(stmt)
     return result.scalars().all()
+
+
+@router.put(
+    "/researchers/{researcher_id}",
+    response_model=ResearcherResponse,
+    dependencies=[Depends(require_roles("researcher", "reviewer", "administrator"))],
+)
+async def update_researcher(
+    researcher_id: int, data: ResearcherUpdate, db: AsyncSession = Depends(get_db)
+):
+    """Partial update; absent fields keep their current values.
+
+    email/orcid_id/scholar_id/scopus_id are UNIQUE columns, so a value already
+    claimed by another profile surfaces as a 409 naming the column rather than
+    a bare 500 IntegrityError.
+    """
+    from sqlalchemy.exc import IntegrityError
+
+    researcher = await db.get(Researcher, researcher_id)
+    if researcher is None:
+        raise HTTPException(status_code=404, detail=f"Researcher {researcher_id} not found")
+
+    changes = data.model_dump(exclude_unset=True)
+    if not changes:
+        await db.refresh(researcher, ["indicators", "cv_profile"])
+        return researcher
+
+    for field, value in changes.items():
+        setattr(researcher, field, value)
+    try:
+        await db.commit()
+    except IntegrityError as exc:
+        await db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Another researcher already uses this "
+                f"{', '.join(sorted(k for k in changes if k in ('email', 'orcid_id', 'scholar_id', 'scopus_id')))}."
+            ),
+        ) from exc
+    await db.refresh(researcher, ["indicators", "cv_profile"])
+    return researcher
+
+
+@router.delete(
+    "/researchers/{researcher_id}",
+    response_model=ResearcherDeleteResponse,
+    dependencies=[Depends(require_roles("reviewer", "administrator"))],
+)
+async def delete_researcher(researcher_id: int, db: AsyncSession = Depends(get_db)):
+    """Remove a researcher, but only while no publications are linked.
+
+    Publication links are the lab's bibliographic record — shared rows another
+    co-author may also point at — so this refuses with 409 rather than
+    unlinking them. Indicators and the CV profile are per-researcher and
+    regenerable by a sync, so they go with the profile.
+    """
+    researcher = await db.get(Researcher, researcher_id)
+    if researcher is None:
+        raise HTTPException(status_code=404, detail=f"Researcher {researcher_id} not found")
+
+    link_count = (
+        await db.execute(
+            select(func.count()).select_from(ResearcherPublication).where(
+                ResearcherPublication.researcher_id == researcher_id
+            )
+        )
+    ).scalar_one()
+    if link_count:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"{researcher.name} still has {link_count} linked publications. "
+                "This refuses rather than unlinking the lab's bibliographic "
+                "record — remove the links first if deletion is intended."
+            ),
+        )
+
+    name = researcher.name
+    # Per-researcher children with no cascade; both are regenerable.
+    await db.execute(
+        delete(BiblioIndicator).where(BiblioIndicator.researcher_id == researcher_id)
+    )
+    cv = await db.execute(select(CVProfile).where(CVProfile.researcher_id == researcher_id))
+    cv_row = cv.scalar_one_or_none()
+    if cv_row is not None:
+        await db.delete(cv_row)
+    await db.delete(researcher)
+    await db.commit()
+    return ResearcherDeleteResponse(deleted_id=researcher_id, name=name)
 
 @router.post("/researchers/{researcher_id}/sync", dependencies=[Depends(require_roles("researcher", "reviewer", "administrator"))])
 async def trigger_sync(researcher_id: int, db: AsyncSession = Depends(get_db)):

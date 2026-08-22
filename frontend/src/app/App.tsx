@@ -16,7 +16,7 @@ import {
   Mail, SquareCode,
   Leaf, Droplet, ThermometerSun, SatelliteDish, BarChart2,
   BrainCircuit, Sprout, Waves, Globe2, Radio, LogIn,
-  Plus, Loader2, CheckCircle2, Trash2, Upload
+  Plus, Loader2, CheckCircle2, Trash2, Upload, Pencil
 } from "lucide-react";
 import {
   AreaChart, Area, BarChart, Bar, LineChart as ReLineChart, Line,
@@ -30,6 +30,8 @@ import {
   useResearchers,
   useSyncResearcher,
   useCreateResearcher,
+  useUpdateResearcher,
+  useDeleteResearcher,
   useResearcherPublications,
   useSyncPublications,
   useSyncScholarPublications,
@@ -1375,6 +1377,77 @@ function NewResearcherForm({ onDone }: { onDone: () => void }) {
   );
 }
 
+// PUT /api/biblio/researchers/{id} is a partial update; the form pre-fills
+// every editable field and sends them all, keeping the mental model simple.
+function EditResearcherForm({ researcher, onDone }: { researcher: ApiResearcher; onDone: () => void }) {
+  const update = useUpdateResearcher();
+  const [name, setName] = useState(researcher.name);
+  const [email, setEmail] = useState(researcher.email);
+  const [department, setDepartment] = useState(researcher.department);
+  const [role, setRole] = useState(researcher.role);
+  const [scholarId, setScholarId] = useState(researcher.scholar_id ?? "");
+  const [orcidId, setOrcidId] = useState(researcher.orcid_id ?? "");
+  const [scopusId, setScopusId] = useState(researcher.scopus_id ?? "");
+
+  return (
+    <form
+      className="space-y-4"
+      onSubmit={e => {
+        e.preventDefault();
+        update.mutate(
+          {
+            id: researcher.id,
+            name: name.trim(),
+            email: email.trim(),
+            department: department.trim(),
+            role: role.trim(),
+            scholar_id: scholarId.trim() || null,
+            orcid_id: orcidId.trim() || null,
+            scopus_id: scopusId.trim() || null,
+          },
+          { onSuccess: onDone },
+        );
+      }}
+    >
+      <Field label="Full name" required>
+        <input className={inputCls} value={name} onChange={e => setName(e.target.value)} required />
+      </Field>
+      <div className="grid grid-cols-2 gap-4">
+        <Field label="Email" required>
+          <input type="email" className={inputCls} value={email} onChange={e => setEmail(e.target.value)} required />
+        </Field>
+        <Field label="Department" required>
+          <input className={inputCls} value={department} onChange={e => setDepartment(e.target.value)} required />
+        </Field>
+      </div>
+      <Field label="Role" required>
+        <input className={inputCls} value={role} onChange={e => setRole(e.target.value)} required />
+      </Field>
+      <div className="pt-1">
+        <p className="text-xs font-semibold text-foreground">External identifiers</p>
+        <div className="grid grid-cols-3 gap-3 mt-2">
+          <Field label="Scholar ID">
+            <input className={inputCls} value={scholarId} onChange={e => setScholarId(e.target.value)} />
+          </Field>
+          <Field label="ORCID">
+            <input className={inputCls} value={orcidId} onChange={e => setOrcidId(e.target.value)} />
+          </Field>
+          <Field label="Scopus ID">
+            <input className={inputCls} value={scopusId} onChange={e => setScopusId(e.target.value)} />
+          </Field>
+        </div>
+      </div>
+      <FormError error={update.error} />
+      <div className="flex justify-end gap-2 pt-1">
+        <button type="button" onClick={onDone} className="px-4 py-2 text-sm font-medium rounded-xl text-muted-foreground hover:bg-secondary hover:text-foreground transition-all duration-200">
+          Cancel
+        </button>
+        <SubmitButton pending={update.isPending} label="Save changes" />
+      </div>
+    </form>
+  );
+}
+
 function ResearcherPublicationsModal({
   researcher,
   onClose,
@@ -1585,8 +1658,10 @@ function ResearcherPublicationsModal({
 function ResearchersPage() {
   const { data: researchers, isLoading, error, refetch } = useResearchers();
   const sync = useSyncResearcher();
+  const deleteResearcher = useDeleteResearcher();
   const [creating, setCreating] = useState(false);
   const [viewing, setViewing] = useState<ApiResearcher | null>(null);
+  const [editing, setEditing] = useState<ApiResearcher | null>(null);
 
   return (
     <div className="p-6 space-y-5 overflow-y-auto h-full scrollbar-hide">
@@ -1616,6 +1691,13 @@ function ResearchersPage() {
       <Modal open={creating} onClose={() => setCreating(false)} title="Add a researcher"
         subtitle="Stored by the bibliometric agent · POST /api/biblio/researchers">
         <NewResearcherForm onDone={() => setCreating(false)} />
+      </Modal>
+
+      <Modal open={editing !== null} onClose={() => setEditing(null)} title="Edit researcher"
+        subtitle="Partial update · PUT /api/biblio/researchers/{id}">
+        {editing && (
+          <EditResearcherForm researcher={editing} onDone={() => setEditing(null)} />
+        )}
       </Modal>
 
       <ResearcherPublicationsModal
@@ -1660,6 +1742,12 @@ function ResearchersPage() {
           <CheckCircle2 size={14} className="shrink-0" />Sync completed.
         </div>
       )}
+      {deleteResearcher.isError && (
+        <div className="flex items-start gap-2 p-3 bg-red-50 border border-red-200 rounded-xl text-xs text-red-700">
+          <AlertCircle size={14} className="shrink-0 mt-0.5" />
+          <span className="break-words">{(deleteResearcher.error as Error).message}</span>
+        </div>
+      )}
 
       <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-2 gap-5">
         {researchers?.map(r => {
@@ -1687,6 +1775,26 @@ function ResearchersPage() {
                     className="w-7 h-7 rounded-lg bg-muted flex items-center justify-center text-muted-foreground hover:bg-primary hover:text-white transition-colors disabled:opacity-50"
                   >
                     <RefreshCw size={13} className={sync.isPending && sync.variables === r.id ? "animate-spin" : ""} />
+                  </button>
+                  <button
+                    onClick={() => setEditing(r)}
+                    title="Edit profile"
+                    className="w-7 h-7 rounded-lg bg-muted flex items-center justify-center text-muted-foreground hover:bg-primary hover:text-white transition-colors"
+                  >
+                    <Pencil size={13} />
+                  </button>
+                  <button
+                    onClick={() => {
+                      if (window.confirm(`Delete ${r.name}? The server refuses while publications remain linked.`))
+                        deleteResearcher.mutate(r.id);
+                    }}
+                    disabled={deleteResearcher.isPending && deleteResearcher.variables === r.id}
+                    title="Delete researcher"
+                    className="w-7 h-7 rounded-lg bg-muted flex items-center justify-center text-muted-foreground hover:bg-red-600 hover:text-white transition-colors disabled:opacity-50"
+                  >
+                    {deleteResearcher.isPending && deleteResearcher.variables === r.id
+                      ? <Loader2 size={13} className="animate-spin" />
+                      : <Trash2 size={13} />}
                   </button>
                 </div>
               </div>

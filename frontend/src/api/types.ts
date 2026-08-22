@@ -235,6 +235,17 @@ export interface ResearcherCreate {
   role: string;
 }
 
+/** PUT /api/biblio/researchers/{id} — partial update, absent fields unchanged. */
+export interface ResearcherUpdate {
+  name?: string;
+  email?: string;
+  orcid_id?: string | null;
+  scholar_id?: string | null;
+  scopus_id?: string | null;
+  department?: string;
+  role?: string;
+}
+
 export interface Publication {
   id: number;
   title: string;
