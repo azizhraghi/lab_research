@@ -5,6 +5,7 @@ Adapted from Friend 1's router to use monorepo imports (shared.database).
 """
 from __future__ import annotations
 import json
+from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -21,6 +22,7 @@ from agents.mis.models import (
 )
 from shared.database import get_db
 from shared.security import require_roles
+from shared.schemas import Event
 
 router = APIRouter(tags=["MIS"])
 
@@ -43,7 +45,19 @@ async def create_projet(projet: ProjetSchema, db: AsyncSession = Depends(get_db)
     db.add(db_projet)
     await db.commit()
     await db.refresh(db_projet)
-    return ProjetSchema.model_validate(db_projet.__dict__)
+    created = ProjetSchema.model_validate(db_projet.__dict__)
+
+    # Publish only after commit: subscribers each use their own DB session and
+    # must be able to retrieve the newly-created project if they need to.
+    from agents.mis.agent import mis_agent
+
+    await mis_agent.emit_event("events", Event(
+        id=str(uuid4()),
+        type="projet.created",
+        source_agent=mis_agent.name,
+        payload=created.model_dump(mode="json"),
+    ))
+    return created
 
 
 @router.get("/projets/", response_model=list[ProjetSchema])

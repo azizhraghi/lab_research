@@ -38,6 +38,7 @@ export interface Source {
 
 export interface Parcel {
   id: number;
+  project_id?: string | null;
   name: string;
   code: string;
   crop_type: string;
@@ -78,6 +79,7 @@ export interface SensorReadingFull extends SensorReading {
 export interface IrrigationEvent {
   id: number;
   parcel_id: number;
+  recommendation_id?: number | null;
   occurred_at: string;
   amount_mm: number;
   method: string;
@@ -148,12 +150,15 @@ export interface CalibrationProfile {
 
 export interface Recommendation {
   id: number;
+  source_reading_id?: number | null;
+  generation_mode?: string;
   generated_at: string;
   recommended_irrigation_mm: number;
   water_balance_mm: number;
   confidence: number;
   rationale: string;
   is_validated: boolean;
+  validated_by?: string | null;
 }
 
 export interface ParcelDetail extends Parcel {
@@ -333,6 +338,7 @@ export interface Alerte {
   niveau: NiveauAlerte;
   message: string;
   source_evenement: string;
+  context: Record<string, unknown>;
   timestamp: string;
   resolue: boolean;
 }
@@ -354,6 +360,46 @@ export interface OrchestratorStatus {
   alertes_actives: number;
   alertes_resolues: number;
   regles_actives: number;
+}
+
+export type PlanningTaskPriority = "low" | "normal" | "high" | "critical";
+export type PlanningTaskStatus = "pending" | "planned" | "in_progress" | "completed";
+
+export interface PlanningTask {
+  id: string;
+  title: string;
+  description?: string | null;
+  project_id?: string | null;
+  priority: PlanningTaskPriority;
+  status: PlanningTaskStatus;
+  due_date?: string | null;
+  duration_hours: number;
+  required_skills: string[];
+  required_equipment_ids: string[];
+  assigned_personnel_id?: string | null;
+  scheduled_start?: string | null;
+  scheduled_end?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface PlanningProposal {
+  id: string;
+  status: "proposed" | "approved" | "discarded";
+  proposed_assignments: Array<{
+    task_id: string;
+    title: string;
+    personnel_id: string;
+    personnel_name: string;
+    equipment_ids: string[];
+    scheduled_start: string;
+    scheduled_end: string;
+    rationale: string;
+  }>;
+  conflicts: Array<{ task_id: string; title: string; reasons: string[] }>;
+  created_at: string;
+  approved_at?: string | null;
+  approved_by?: string | null;
 }
 
 export interface OptimizationRun {

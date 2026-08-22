@@ -27,7 +27,7 @@ class OrchestratorAgent(BaseAgent):
         # Routing table: event type → list of handler functions
         self._regles: dict[str, list] = {
             # MIS
-            "projet.created":                [self._verifier_projet],
+            "projet.created":                [self._verifier_projet, self._assign_parcel_setup],
             "projet.statut_change":          [self._verifier_statut_projet],
             "budget.depense":                [self._verifier_seuil_budget],
             "equipement.etat_change":        [self._verifier_equipement],
@@ -44,6 +44,10 @@ class OrchestratorAgent(BaseAgent):
             # Optimisation
             "optimisation.strategie_calculee": [self._notifier_strategie],
             "optimisation.contrainte_violee":  [self._alerte_contrainte],
+            # Digital Twin: only substantive water applications become human
+            # work items; every field action linked to the advice closes it.
+            "twin.recommendation_generated":  [self._assign_irrigation_review],
+            "irrigation.applied":              [self._close_irrigation_review],
             # Qualité
             "qualite.anomalie_detectee":     [self._suspendre_projet],
             "qualite.validation_ok":         [self._marquer_conforme],
@@ -84,6 +88,7 @@ class OrchestratorAgent(BaseAgent):
                 db.add(AlerteDB(
                     id=alerte.id, niveau=alerte.niveau, message=alerte.message,
                     source_evenement=alerte.source_evenement,
+                    context=alerte.context,
                     timestamp=alerte.timestamp, resolue=False,
                 ))
             db.add(HistoriqueEvenementDB(
@@ -119,6 +124,80 @@ class OrchestratorAgent(BaseAgent):
                 message=f"Projet '{payload.get('nom', '?')}' créé avec un budget nul.",
                 source_evenement=event.type,
             )
+        return None
+
+    async def _assign_parcel_setup(self, event: Event) -> Alerte:
+        """Create the next human task without inventing missing field data."""
+        project_name = event.payload.get("nom", "?")
+        responsible = event.payload.get("responsable") or "unassigned project lead"
+        return Alerte(
+            niveau="info",
+            message=(
+                f"Parcel setup assigned to {responsible}: add the field location, crop "
+                f"and soil profile for project '{project_name}' before using Digital Twin."
+            ),
+            source_evenement=event.type,
+            context={
+                "task_type": "parcel_setup",
+                "project_id": event.payload.get("id"),
+                "project_name": project_name,
+                "assignee": responsible,
+            },
+        )
+
+    async def _assign_irrigation_review(self, event: Event) -> Alerte | None:
+        """Assign material irrigation advice without treating it as actuation."""
+        amount = event.payload.get("recommended_irrigation_mm")
+        recommendation_id = event.payload.get("recommendation_id")
+        parcel_id = event.payload.get("parcel_id")
+        if not isinstance(amount, (int, float)) or amount < 20.0:
+            return None
+        if not isinstance(recommendation_id, int) or not isinstance(parcel_id, int):
+            return None
+
+        # Retried bus messages and a user recomputing the same reading must not
+        # create a second open task for one recommendation.
+        from sqlalchemy import select
+        from shared.database import AsyncSessionLocal
+        from agents.orchestrateur.models import AlerteDB
+
+        async with AsyncSessionLocal() as db:
+            rows = (await db.execute(select(AlerteDB).where(AlerteDB.resolue == False))).scalars().all()  # noqa: E712
+            if any((row.context or {}).get("recommendation_id") == recommendation_id for row in rows):
+                return None
+
+        parcel_name = event.payload.get("parcel_name") or f"parcel #{parcel_id}"
+        return Alerte(
+            niveau="orange",
+            message=(f"Irrigation review assigned: {amount:.1f} mm is recommended for "
+                     f"{parcel_name}. Review the advice, then log the amount actually applied."),
+            source_evenement=event.type,
+            context={
+                "task_type": "irrigation_review",
+                "parcel_id": parcel_id,
+                "project_id": event.payload.get("project_id"),
+                "recommendation_id": recommendation_id,
+                "recommended_irrigation_mm": amount,
+            },
+        )
+
+    async def _close_irrigation_review(self, event: Event) -> None:
+        """Resolve the matching task only after a reviewed action is logged."""
+        recommendation_id = event.payload.get("recommendation_id")
+        if not isinstance(recommendation_id, int):
+            return None
+
+        from sqlalchemy import select
+        from shared.database import AsyncSessionLocal
+        from agents.orchestrateur.models import AlerteDB
+
+        async with AsyncSessionLocal() as db:
+            rows = (await db.execute(select(AlerteDB).where(AlerteDB.resolue == False))).scalars().all()  # noqa: E712
+            for row in rows:
+                context = row.context or {}
+                if context.get("task_type") == "irrigation_review" and context.get("recommendation_id") == recommendation_id:
+                    row.resolue = True
+            await db.commit()
         return None
 
     async def _verifier_statut_projet(self, event: Event) -> Alerte | None:
@@ -242,7 +321,7 @@ class OrchestratorAgent(BaseAgent):
         # existing `.reverse()` for "recent" views still works.
         return [Alerte(
             id=r.id, niveau=r.niveau, message=r.message,
-            source_evenement=r.source_evenement,
+            source_evenement=r.source_evenement, context=r.context or {},
             timestamp=r.timestamp, resolue=r.resolue,
         ) for r in rows]
 

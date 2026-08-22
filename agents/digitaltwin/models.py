@@ -11,6 +11,7 @@ class Parcel(Base):
     __tablename__ = "twin_parcels"
 
     id = Column(Integer, primary_key=True, index=True)
+    project_id = Column(String, index=True, nullable=True)
     name = Column(String, index=True)
     code = Column(String, unique=True, index=True)
     crop_type = Column(String)
@@ -102,6 +103,12 @@ class IrrigationEvent(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     parcel_id = Column(Integer, ForeignKey("twin_parcels.id"), index=True, nullable=False)
+    # Nullable for historical/manual field logs. When present, this makes the
+    # applied amount auditable against the reviewed recommendation it followed.
+    # Integrity is enforced by the write route (same parcel + approved advice).
+    # Keeping this nullable indexed link avoids a destructive cross-table
+    # constraint change for existing field logs on SQLite deployments.
+    recommendation_id = Column(Integer, index=True, nullable=True)
     occurred_at = Column(DateTime, index=True, nullable=False)
     amount_mm = Column(Float, nullable=False)
     method = Column(String, default="", nullable=False)
@@ -133,11 +140,17 @@ class CalibrationProfile(Base):
 
 
 class IrrigationRecommendation(Base):
-    """Irrigation advice based on sensor data and the water-balance model."""
+    """Traceable irrigation advice, always requiring a human field decision."""
     __tablename__ = "twin_recommendations"
 
     id = Column(Integer, primary_key=True, index=True)
     parcel_id = Column(Integer, ForeignKey("twin_parcels.id"), index=True)
+    # A reading can create at most one automatic recommendation. This is the
+    # durable idempotency key for retried event-bus messages.
+    source_reading_id = Column(
+        Integer, ForeignKey("twin_sensor_readings.id"), unique=True, nullable=True,
+    )
+    generation_mode = Column(String, default="manual", nullable=False)
     generated_at = Column(DateTime, default=datetime.datetime.utcnow)
     water_balance_mm = Column(Float)
     recommended_irrigation_mm = Column(Float)

@@ -5,6 +5,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 
 class ParcelCreate(BaseModel):
+    project_id: Optional[str] = None
     name: str
     code: str
     crop_type: str = "wheat"
@@ -31,6 +32,8 @@ class SensorReadingInline(BaseModel):
 
 class RecommendationInline(BaseModel):
     id: int
+    source_reading_id: Optional[int] = None
+    generation_mode: str = "manual"
     generated_at: datetime
     recommended_irrigation_mm: float
     water_balance_mm: float
@@ -43,6 +46,7 @@ class RecommendationInline(BaseModel):
 
 class ParcelResponse(BaseModel):
     id: int
+    project_id: Optional[str]
     name: str
     code: str
     crop_type: str
@@ -109,6 +113,7 @@ class ForecastRefreshResponse(BaseModel):
 
 
 class IrrigationEventCreate(BaseModel):
+    recommendation_id: Optional[int] = None
     occurred_at: datetime
     amount_mm: float = Field(gt=0.0, le=500.0)
     method: str = ""
@@ -120,6 +125,7 @@ class IrrigationEventCreate(BaseModel):
 class IrrigationEventResponse(BaseModel):
     id: int
     parcel_id: int
+    recommendation_id: Optional[int]
     occurred_at: datetime
     amount_mm: float
     method: str
@@ -160,12 +166,15 @@ class CalibrationProfileResponse(BaseModel):
 class IrrigationRecommendationResponse(BaseModel):
     id: int
     parcel_id: int
+    source_reading_id: Optional[int]
+    generation_mode: str
     generated_at: datetime
     water_balance_mm: float
     recommended_irrigation_mm: float
     confidence: float
     rationale: str
     is_validated: bool
+    validated_by: Optional[str]
 
     model_config = ConfigDict(from_attributes=True)
 

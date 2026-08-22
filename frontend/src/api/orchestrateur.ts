@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { apiFetch } from "../lib/apiClient";
-import type { Alerte, HistoriqueEvenement, OrchestratorStatus } from "./types";
+import type { Alerte, HistoriqueEvenement, OrchestratorStatus, PlanningProposal, PlanningTask } from "./types";
 
 export function useOrchestratorStatus() {
   return useQuery<OrchestratorStatus>({
@@ -41,6 +41,60 @@ export function useTriggerEvent() {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["orch", "historique"] });
       qc.invalidateQueries({ queryKey: ["orch", "alertes"] });
+    },
+  });
+}
+
+export type PlanningTaskCreate = Pick<PlanningTask,
+  "title" | "description" | "project_id" | "priority" | "due_date" |
+  "duration_hours" | "required_skills" | "required_equipment_ids"
+>;
+
+export function usePlanningTasks() {
+  return useQuery<PlanningTask[]>({
+    queryKey: ["orch", "planning", "tasks"],
+    queryFn: () => apiFetch<PlanningTask[]>("/api/orchestrateur/planning/tasks"),
+  });
+}
+
+export function useCreatePlanningTask() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: PlanningTaskCreate) =>
+      apiFetch<PlanningTask>("/api/orchestrateur/planning/tasks", { method: "POST", body: JSON.stringify(body) }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["orch", "planning"] });
+      qc.invalidateQueries({ queryKey: ["orch", "historique"] });
+    },
+  });
+}
+
+export function usePlanningProposals() {
+  return useQuery<PlanningProposal[]>({
+    queryKey: ["orch", "planning", "proposals"],
+    queryFn: () => apiFetch<PlanningProposal[]>("/api/orchestrateur/planning/proposals"),
+  });
+}
+
+export function useGeneratePlanningProposal() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () => apiFetch<PlanningProposal>("/api/orchestrateur/planning/proposals", { method: "POST" }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["orch", "planning"] });
+      qc.invalidateQueries({ queryKey: ["orch", "historique"] });
+    },
+  });
+}
+
+export function useApprovePlanningProposal() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (proposalId: string) =>
+      apiFetch<PlanningProposal>(`/api/orchestrateur/planning/proposals/${proposalId}/approve`, { method: "PATCH" }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["orch", "planning"] });
+      qc.invalidateQueries({ queryKey: ["orch", "historique"] });
     },
   });
 }

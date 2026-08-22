@@ -5,7 +5,9 @@ Adapted from Friend 1's QualiteAgent to use the monorepo's shared BaseAgent.
 """
 from __future__ import annotations
 import re
+from datetime import datetime
 from typing import Optional
+from uuid import uuid4
 
 from shared.base_agent import BaseAgent
 from shared.schemas import Event, AgentAction, ActionResult
@@ -33,8 +35,41 @@ class QualiteAgent(BaseAgent):
         try:
             if event.type == "qualite.validation_demandee":
                 await self.handle_event(event)
+            elif event.type == "twin.reading_recorded":
+                await self._validate_twin_reading(event)
         except Exception as e:
             print(f"[{self.name}] Error handling {event.type}: {e}")
+
+    async def _validate_twin_reading(self, event: Event) -> None:
+        """Gate automatic advice on explicit reading-quality checks."""
+        payload = event.payload
+        parcel_id = payload.get("parcel_id")
+        reading_id = payload.get("reading_id")
+        reading = payload.get("reading") or {}
+        issues: list[str] = []
+
+        if not isinstance(parcel_id, int) or not isinstance(reading_id, int):
+            issues.append("missing parcel or reading identifier")
+        if reading.get("quality_flag") != "ok":
+            issues.append("reading quality flag is not ok")
+        try:
+            recorded_at = datetime.fromisoformat(str(reading.get("recorded_at")))
+            if recorded_at > datetime.utcnow():
+                issues.append("reading timestamp is in the future")
+        except (TypeError, ValueError):
+            issues.append("reading timestamp is invalid")
+
+        await self.emit_event("events", Event(
+            id=str(uuid4()),
+            type="twin.reading_validated" if not issues else "twin.reading_rejected",
+            source_agent=self.name,
+            payload={
+                "parcel_id": parcel_id,
+                "reading_id": reading_id,
+                "issues": issues,
+                "review_required": True,
+            },
+        ))
 
     async def handle_event(self, event: Event) -> Optional[AgentAction]:
         """Handle quality validation events."""

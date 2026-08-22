@@ -1,13 +1,15 @@
 import csv
 import io
 from typing import List
+from uuid import uuid4
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from shared.database import get_db
-from shared.security import require_roles
+from shared.security import User, require_roles
+from shared.schemas import Event
 from agents.digitaltwin.models import (
     CalibrationProfile,
     IrrigationEvent,
@@ -59,6 +61,15 @@ async def list_parcels(db: AsyncSession = Depends(get_db)):
 
 @router.post("/parcels", response_model=ParcelResponse, dependencies=[Depends(require_roles("administrator"))])
 async def create_parcel(data: ParcelCreate, db: AsyncSession = Depends(get_db)):
+    if data.project_id:
+        # The project lives in MIS. Validate the cross-agent link at creation
+        # time while keeping the twin usable for standalone research parcels.
+        from agents.mis.models import Projet as ProjetModel
+
+        project = await db.get(ProjetModel, data.project_id)
+        if project is None:
+            raise HTTPException(status_code=404, detail="Linked project not found")
+
     parcel = Parcel(**data.model_dump())
     db.add(parcel)
     await db.commit()
@@ -241,6 +252,18 @@ async def add_reading(
     reading = await digital_twin_agent.ingest_reading(db, parcel_id, data.model_dump())
     await db.commit()
     await db.refresh(reading)
+    # The commit comes first: downstream agents use independent sessions and
+    # must never inspect an uncommitted field measurement.
+    await digital_twin_agent.emit_event("events", Event(
+        id=str(uuid4()),
+        type="twin.reading_recorded",
+        source_agent="digital_twin",
+        payload={
+            "parcel_id": parcel_id,
+            "reading_id": reading.id,
+            "reading": SensorReadingResponse.model_validate(reading).model_dump(mode="json"),
+        },
+    ))
     return reading
 
 
@@ -378,6 +401,28 @@ async def import_field_readings(
 
     if created or updated:
         await db.commit()
+        # A bulk import may contain historical records. Only the newest accepted
+        # reading is eligible to drive the current irrigation decision.
+        latest_result = await db.execute(
+            select(SensorReading)
+            .where(SensorReading.parcel_id == parcel_id)
+            .order_by(SensorReading.recorded_at.desc())
+            .limit(1)
+        )
+        latest = latest_result.scalar_one_or_none()
+        if latest:
+            from agents.digitaltwin.agent import digital_twin_agent
+
+            await digital_twin_agent.emit_event("events", Event(
+                id=str(uuid4()),
+                type="twin.reading_recorded",
+                source_agent="digital_twin",
+                payload={
+                    "parcel_id": parcel_id,
+                    "reading_id": latest.id,
+                    "reading": SensorReadingResponse.model_validate(latest).model_dump(mode="json"),
+                },
+            ))
     else:
         await db.rollback()
 
@@ -421,10 +466,33 @@ async def record_irrigation_event(
     parcel = await db.get(Parcel, parcel_id)
     if not parcel:
         raise HTTPException(status_code=404, detail="Parcel not found")
+    if data.recommendation_id is not None:
+        recommendation = await db.get(IrrigationRecommendation, data.recommendation_id)
+        if not recommendation:
+            raise HTTPException(status_code=404, detail="Irrigation recommendation not found")
+        if recommendation.parcel_id != parcel_id:
+            raise HTTPException(status_code=422, detail="Recommendation belongs to another parcel")
+        if not recommendation.is_validated:
+            raise HTTPException(status_code=409, detail="Recommendation must be approved before logging its application")
+
     event = IrrigationEvent(parcel_id=parcel_id, **data.model_dump())
     db.add(event)
     await db.commit()
     await db.refresh(event)
+    if event.recommendation_id is not None:
+        from agents.digitaltwin.agent import digital_twin_agent
+
+        await digital_twin_agent.emit_event("events", Event(
+            id=str(uuid4()),
+            type="irrigation.applied",
+            source_agent="digital_twin",
+            payload={
+                "parcel_id": parcel_id,
+                "recommendation_id": event.recommendation_id,
+                "irrigation_event_id": event.id,
+                "amount_mm": event.amount_mm,
+            },
+        ))
     return event
 
 
@@ -514,6 +582,21 @@ async def generate_recommendation(
         recommendation = await digital_twin_agent.generate_recommendation(db, parcel_id)
         await db.commit()
         await db.refresh(recommendation)
+        parcel = await db.get(Parcel, parcel_id)
+        await digital_twin_agent.emit_event("events", Event(
+            id=str(uuid4()),
+            type="twin.recommendation_generated",
+            source_agent="digital_twin",
+            payload={
+                "parcel_id": parcel_id,
+                "recommendation_id": recommendation.id,
+                "recommended_irrigation_mm": recommendation.recommended_irrigation_mm,
+                "generation_mode": recommendation.generation_mode,
+                "project_id": parcel.project_id if parcel else None,
+                "parcel_name": parcel.name if parcel else None,
+                "review_required": True,
+            },
+        ))
         return recommendation
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
@@ -535,6 +618,29 @@ async def list_recommendations(
         .limit(limit)
     )
     return result.scalars().all()
+
+
+@router.patch(
+    "/recommendations/{recommendation_id}/approve",
+    response_model=IrrigationRecommendationResponse,
+)
+async def approve_recommendation(
+    recommendation_id: int,
+    user: User = Depends(require_roles("reviewer", "administrator")),
+    db: AsyncSession = Depends(get_db),
+):
+    """Record expert approval; this does not command any irrigation hardware."""
+    recommendation = await db.get(IrrigationRecommendation, recommendation_id)
+    if not recommendation:
+        raise HTTPException(status_code=404, detail="Irrigation recommendation not found")
+    if recommendation.is_validated:
+        raise HTTPException(status_code=400, detail="Recommendation has already been approved")
+
+    recommendation.is_validated = True
+    recommendation.validated_by = user.email or user.id
+    await db.commit()
+    await db.refresh(recommendation)
+    return recommendation
 
 
 @router.post(

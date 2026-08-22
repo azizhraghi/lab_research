@@ -16,7 +16,11 @@ export function useCreateProjet() {
   return useMutation({
     mutationFn: (body: Omit<Projet, "id"> & { id?: string }) =>
       apiFetch<Projet>("/api/mis/projets/", { method: "POST", body: JSON.stringify(body) }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["mis", "projets"] }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["mis", "projets"] });
+      qc.invalidateQueries({ queryKey: ["orch", "alertes"] });
+      qc.invalidateQueries({ queryKey: ["orch", "historique"] });
+    },
   });
 }
 

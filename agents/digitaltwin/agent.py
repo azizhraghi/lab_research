@@ -3,6 +3,7 @@ Digital Twin Agent — orchestrates sensor ingestion, irrigation recommendations
 and simulation scenarios for irrigated parcels.
 """
 from typing import Optional
+from uuid import uuid4
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
@@ -24,7 +25,53 @@ class DigitalTwinAgent(BaseAgent):
     requires_human_approval = []
 
     async def _setup_subscriptions(self):
-        pass
+        await self._subscribe("events", self._on_bus_event)
+
+    async def _on_bus_event(self, event: Event) -> None:
+        """Create advice only after the quality agent accepts a new reading."""
+        if event.type != "twin.reading_validated":
+            return
+
+        parcel_id = event.payload.get("parcel_id")
+        reading_id = event.payload.get("reading_id")
+        if not isinstance(parcel_id, int) or not isinstance(reading_id, int):
+            return
+
+        from shared.database import AsyncSessionLocal
+
+        try:
+            async with AsyncSessionLocal() as db:
+                recommendation = await self.generate_recommendation(
+                    db,
+                    parcel_id,
+                    source_reading_id=reading_id,
+                    generation_mode="automatic",
+                )
+                await db.commit()
+                await db.refresh(recommendation)
+                parcel = await db.get(Parcel, parcel_id)
+        except ValueError as exc:
+            print(f"[{self.name}] No automatic recommendation: {exc}")
+            return
+        except Exception as exc:
+            print(f"[{self.name}] Automatic recommendation failed: {exc}")
+            return
+
+        await self.emit_event("events", Event(
+            id=str(uuid4()),
+            type="twin.recommendation_generated",
+            source_agent=self.name,
+            payload={
+                "parcel_id": parcel_id,
+                "reading_id": reading_id,
+                "recommendation_id": recommendation.id,
+                "recommended_irrigation_mm": recommendation.recommended_irrigation_mm,
+                "parcel_name": parcel.name if parcel else None,
+                "project_id": parcel.project_id if parcel else None,
+                "generation_mode": recommendation.generation_mode,
+                "review_required": True,
+            },
+        ))
 
     async def handle_event(self, event: Event) -> Optional[AgentAction]:
         return None
@@ -48,25 +95,45 @@ class DigitalTwinAgent(BaseAgent):
         return reading
 
     async def generate_recommendation(
-        self, db: AsyncSession, parcel_id: int
+        self,
+        db: AsyncSession,
+        parcel_id: int,
+        source_reading_id: int | None = None,
+        generation_mode: str = "manual",
     ) -> IrrigationRecommendation:
-        """Generate an irrigation recommendation from the latest sensor reading."""
+        """Generate traceable advice from one reading, never field actuation."""
         # Get parcel
         parcel = await db.get(Parcel, parcel_id)
         if not parcel:
             raise ValueError(f"Parcel {parcel_id} not found")
 
-        # Get latest reading
-        stmt = (
-            select(SensorReading)
-            .where(SensorReading.parcel_id == parcel_id)
-            .order_by(SensorReading.recorded_at.desc())
-            .limit(1)
-        )
-        result = await db.execute(stmt)
-        latest = result.scalar_one_or_none()
+        if source_reading_id is not None:
+            latest = await db.get(SensorReading, source_reading_id)
+            if not latest or latest.parcel_id != parcel_id:
+                raise ValueError("The source reading no longer belongs to this parcel")
+        else:
+            stmt = (
+                select(SensorReading)
+                .where(SensorReading.parcel_id == parcel_id)
+                .order_by(SensorReading.recorded_at.desc())
+                .limit(1)
+            )
+            result = await db.execute(stmt)
+            latest = result.scalar_one_or_none()
         if not latest:
             raise ValueError(f"No sensor readings for parcel {parcel_id}")
+
+        # A reading is the durable idempotency key. This also means the manual
+        # endpoint safely returns an already-generated agent recommendation
+        # instead of violating the unique source_reading_id constraint.
+        existing_result = await db.execute(
+            select(IrrigationRecommendation).where(
+                IrrigationRecommendation.source_reading_id == latest.id,
+            )
+        )
+        existing = existing_result.scalar_one_or_none()
+        if existing:
+            return existing
 
         # Run the physics model
         kc = CROP_COEFFICIENTS.get(parcel.crop_type, 1.0)
@@ -83,6 +150,8 @@ class DigitalTwinAgent(BaseAgent):
         # Store the recommendation
         rec = IrrigationRecommendation(
             parcel_id=parcel_id,
+            source_reading_id=latest.id,
+            generation_mode=generation_mode,
             water_balance_mm=result.water_balance_mm,
             recommended_irrigation_mm=result.recommended_irrigation_mm,
             confidence=result.confidence,

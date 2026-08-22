@@ -26,6 +26,7 @@ export function useParcels() {
  * Note the route is guarded by require_roles("administrator").
  */
 export interface ParcelCreate {
+  project_id?: string;
   name: string;
   code: string;
   area_ha: number;
@@ -330,6 +331,7 @@ export function useIrrigationEvents(id?: number | null, limit = 60) {
  * counts those inside the reading period it fits, so the date matters.
  */
 export interface IrrigationEventCreate {
+  recommendation_id?: number;
   occurred_at: string;
   /** Water applied, in mm. Server enforces gt=0 and le=500 — a 0 is a 422. */
   amount_mm: number;
@@ -376,6 +378,21 @@ export function useRecommend() {
         { method: "POST" },
       ),
     onSuccess: (_data, parcelId) => {
+      qc.invalidateQueries({ queryKey: ["twin", "parcel", parcelId] });
+    },
+  });
+}
+
+/** Reviewer/admin approval records a human decision; it never actuates irrigation. */
+export function useApproveRecommendation() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (input: { recommendationId: number; parcelId: number }) =>
+      apiFetch<Recommendation & { parcel_id: number }>(
+        `/api/twin/recommendations/${input.recommendationId}/approve`,
+        { method: "PATCH" },
+      ),
+    onSuccess: (_data, { parcelId }) => {
       qc.invalidateQueries({ queryKey: ["twin", "parcel", parcelId] });
     },
   });

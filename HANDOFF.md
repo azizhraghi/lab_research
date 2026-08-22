@@ -1,9 +1,47 @@
 # Session handoff — "make the platform actually work"
 
-Last updated: 2026-08-10. Keep this file current at the end of every session so a
+Last updated: 2026-08-21. Keep this file current at the end of every session so a
 fresh session can resume without replaying the whole conversation.
 
-## 2026-08-10 (latest) — ORCID publications ETL + parcel delete
+## 2026-08-21 (latest) — planning, alert context, and the MIS→twin chain
+
+One uncommitted session's worth of work, audited (statically and live) and
+committed as-is. Operation count **74 → 81**. Four features that close the loop
+between management data and field work:
+
+- **Task planning** (`agents/orchestrateur/planning.py` + `PlanningTaskDB` +
+  `PlanningProposalDB` + 5 routes). Deterministic constraint heuristic — skills
+  subset-match on `competences`, `disponible`, equipment `etat`, committed-work
+  windows as hard constraints, pending work reserved only within one draft.
+  Returns explicit conflicts ("No available person matches: X") instead of
+  forcing an assignment. Proposals require human approval before a task moves
+  `pending → planned`. Migration `h6b4e1c9a2d7`.
+- **Alert context + dashboard actions.** `AlerteDB.context` (JSON, migration
+  `e4c8f6a2d9b1`). `parcel_setup` alerts render a pre-filled New-Parcel modal;
+  `irrigation_review` alerts hand off to the IoT page with the parcel focused.
+- **MIS→twin wiring.** `POST /projets/` now emits `projet.created` after
+  commit; the orchestrator turns it into a `parcel_setup` alert. Parcels gain a
+  soft `project_id` link (indexed String, app-validated — migration
+  `f2d7b4c1e8a6`) because MIS ids are UUIDs and hard FKs across agents were
+  judged too rigid for now.
+- **Reading→recommendation traceability.** Qualité now validates readings on
+  `twin.reading_recorded` and emits `twin.reading_validated`; the twin agent
+  auto-generates a recommendation (idempotent on `source_reading_id`, migration
+  `d1f4e2a9b3c7`) which raises an `irrigation_review` alert; approving then
+  logging the irrigation resolves the alert. Irrigation events can now cite the
+  recommendation they executed (migration `g3a9c8d2e1f4`).
+
+Live chain verified end to end before commit: reading → validation → auto
+recommendation (`generation_mode="automatic"`) → orange alert → 409 on
+apply-before-approve → approve → apply → alert auto-resolved.
+
+Known asymmetry (deliberate, documented in `schemas.py:226`): migration
+`d1f4e2a9b3c7` has no FK on `source_reading_id` while the ORM declares one —
+traceability is app-enforced. Four of the five previously-orphaned frontend
+hooks are now wired; `useRunTwinSimulation` remains (dead code, superseded by
+`/api/simulation`).
+
+## 2026-08-10 — ORCID publications ETL + parcel delete
 
 Two features, both chosen by the user after an audit of the cahier des charges.
 Operation count **71 → 74**.

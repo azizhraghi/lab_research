@@ -56,9 +56,14 @@ async def on_startup():
     # prevent the API from booting, so each start is individually guarded.
     from agents.veille.agent import veille_agent
     from agents.bibliometrie.agent import bibliometrie_agent
+    from agents.mis.agent import mis_agent
+    from agents.digitaltwin.agent import digital_twin_agent
     from agents.orchestrateur.agent import orchestrator_agent
     from agents.qualite.agent import qualite_agent
-    for agent in (veille_agent, bibliometrie_agent, orchestrator_agent, qualite_agent):
+    # Subscription order is significant for the synchronous in-memory bus used
+    # in development: persist the validation event before the twin reacts and
+    # emits its nested recommendation event, preserving an honest audit trail.
+    for agent in (veille_agent, bibliometrie_agent, mis_agent, orchestrator_agent, qualite_agent, digital_twin_agent):
         try:
             await agent.start()
         except Exception as e:

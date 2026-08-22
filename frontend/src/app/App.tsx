@@ -23,7 +23,7 @@ import {
   XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer
 } from "recharts";
 import { useAuth } from "../auth/AuthContext";
-import type { Article, Researcher as ApiResearcher, HistoriqueEvenement, Projet, Personnel, Equipement, Parcel, ParcelDetail, SensorReadingFull, CalibrationProfile } from "../api/types";
+import type { Article, Researcher as ApiResearcher, HistoriqueEvenement, Projet, Personnel, Equipement, Parcel, ParcelDetail, SensorReadingFull, CalibrationProfile, Alerte, IrrigationEvent, Recommendation, PlanningTask } from "../api/types";
 import { API_BASE_URL } from "../lib/apiClient";
 import { useArticles, useTriggerScrape, useSources, useCreateSource } from "../api/veille";
 import {
@@ -36,7 +36,7 @@ import {
 import { useProjets, useCreateProjet, usePersonnels, useEquipements, useBudgets,
          useCreatePersonnel, useCreateEquipement, useCreateBudget, useDeleteProjet } from "../api/mis";
 import { useQualiteStatus, useRapports, useValiderEntite, type QualiteEntite } from "../api/qualite";
-import { useOrchestratorStatus, useAlertes, useHistorique, useResolveAlerte, useTriggerEvent } from "../api/orchestrateur";
+import { useOrchestratorStatus, useAlertes, useHistorique, useResolveAlerte, useTriggerEvent, usePlanningTasks, usePlanningProposals, useCreatePlanningTask, useGeneratePlanningProposal, useApprovePlanningProposal } from "../api/orchestrateur";
 import {
   useParcels,
   useParcel,
@@ -57,6 +57,7 @@ import {
   useIrrigationEvents,
   useRecordIrrigation,
   useRecommend,
+  useApproveRecommendation,
 } from "../api/digitaltwin";
 import type { SensorReadingDeleteResult } from "../api/digitaltwin";
 
@@ -700,7 +701,8 @@ function HomePage({ setPage }: { setPage: (p: Page) => void }) {
 }
 
 // ─── DASHBOARD PAGE ─────────────────────────────────────────────────────────
-function DashboardPage() {
+function DashboardPage({ onNavigate }: { onNavigate: (page: Page) => void }) {
+  const [setupAlert, setSetupAlert] = useState<Alerte | null>(null);
   const { data: projets } = useProjets();
   const { data: dbResearchers } = useResearchers();
   const { data: articles } = useArticles();
@@ -708,6 +710,9 @@ function DashboardPage() {
   const { data: historique } = useHistorique();
   const { data: alertes } = useAlertes();
   const resolveAlerte = useResolveAlerte();
+  const setupProjectName = typeof setupAlert?.context.project_name === "string"
+    ? setupAlert.context.project_name
+    : "Project";
 
   const projectCount = projets?.length ?? 0;
   const activeProjects = projets?.filter(p => p.statut === "en_cours").length ?? 0;
@@ -744,6 +749,25 @@ function DashboardPage() {
           {kpis.map(k => <KPICard key={k.label} {...k} />)}
         </div>
       </div>
+
+      <Modal
+        open={setupAlert !== null}
+        onClose={() => !resolveAlerte.isPending && setSetupAlert(null)}
+        title="Set up Digital Twin parcel"
+        subtitle={`Complete the field profile for ${setupProjectName}. The task closes only after the parcel is created.`}
+      >
+        <NewParcelForm
+          initialName={`${setupProjectName} parcel`}
+          projectId={typeof setupAlert?.context.project_id === "string" ? setupAlert.context.project_id : undefined}
+          onDone={() => setSetupAlert(null)}
+          onCreated={() => {
+            if (setupAlert) {
+              resolveAlerte.mutate(setupAlert.id, { onSuccess: () => setSetupAlert(null) });
+            }
+          }}
+        />
+        <FormError error={resolveAlerte.error} />
+      </Modal>
 
       {/* Bottom row */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
@@ -786,13 +810,35 @@ function DashboardPage() {
                     <p className="text-xs font-medium text-foreground leading-snug">{a.message}</p>
                     <p className="text-[10px] text-muted-foreground">{a.niveau} · {new Date(a.timestamp).toLocaleString()}</p>
                   </div>
-                  <button
-                    onClick={() => resolveAlerte.mutate(a.id)}
-                    disabled={resolveAlerte.isPending}
-                    className="shrink-0 px-2.5 py-1.5 text-[10px] font-semibold text-primary border border-primary/30 rounded-lg hover:bg-primary/10 disabled:opacity-50 transition-colors"
-                  >
-                    {resolveAlerte.isPending ? "Resolving…" : "Resolve"}
-                  </button>
+                  {a.context.task_type === "parcel_setup" && (
+                    <button
+                      onClick={() => setSetupAlert(a)}
+                      className="shrink-0 px-2.5 py-1.5 text-[10px] font-semibold text-primary border border-primary/30 rounded-lg hover:bg-primary/10 transition-colors"
+                    >
+                      Set up parcel
+                    </button>
+                  )}
+                  {a.context.task_type === "irrigation_review" && (
+                    <button
+                      onClick={() => {
+                        const parcelId = a.context.parcel_id;
+                        if (typeof parcelId === "number") window.sessionStorage.setItem("lrste.iot.parcelId", String(parcelId));
+                        onNavigate("iot");
+                      }}
+                      className="shrink-0 px-2.5 py-1.5 text-[10px] font-semibold text-primary border border-primary/30 rounded-lg hover:bg-primary/10 transition-colors"
+                    >
+                      Review irrigation
+                    </button>
+                  )}
+                  {a.context.task_type !== "parcel_setup" && a.context.task_type !== "irrigation_review" && (
+                    <button
+                      onClick={() => resolveAlerte.mutate(a.id)}
+                      disabled={resolveAlerte.isPending}
+                      className="shrink-0 px-2.5 py-1.5 text-[10px] font-semibold text-primary border border-primary/30 rounded-lg hover:bg-primary/10 disabled:opacity-50 transition-colors"
+                    >
+                      {resolveAlerte.isPending ? "Resolving…" : "Resolve"}
+                    </button>
+                  )}
                 </div>
               );
             })}
@@ -1687,6 +1733,129 @@ function ManualEventForm({ onDone }: { onDone: () => void }) {
   );
 }
 
+function PlanningTaskForm({ onDone }: { onDone: () => void }) {
+  const createTask = useCreatePlanningTask();
+  const { data: projects } = useProjets();
+  const { data: equipment } = useEquipements();
+  const [title, setTitle] = useState("");
+  const [description, setDescription] = useState("");
+  const [projectId, setProjectId] = useState("");
+  const [priority, setPriority] = useState<PlanningTask["priority"]>("normal");
+  const [dueDate, setDueDate] = useState("");
+  const [duration, setDuration] = useState("2");
+  const [skills, setSkills] = useState("");
+  const [equipmentIds, setEquipmentIds] = useState<string[]>([]);
+
+  const submit = (event: React.FormEvent) => {
+    event.preventDefault();
+    createTask.mutate({
+      title: title.trim(),
+      description: description.trim() || null,
+      project_id: projectId || null,
+      priority,
+      due_date: dueDate || null,
+      duration_hours: Number(duration),
+      required_skills: skills.split(",").map(skill => skill.trim()).filter(Boolean),
+      required_equipment_ids: equipmentIds,
+    }, { onSuccess: onDone });
+  };
+
+  return (
+    <form className="space-y-3" onSubmit={submit}>
+      <Field label="Task" required>
+        <input className={inputCls} required value={title} onChange={event => setTitle(event.target.value)} placeholder="Calibrate lysimeter readings" />
+      </Field>
+      <Field label="Context">
+        <textarea className={inputCls} rows={2} value={description} onChange={event => setDescription(event.target.value)} placeholder="Optional notes for the reviewer" />
+      </Field>
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Project">
+          <select className={inputCls} value={projectId} onChange={event => setProjectId(event.target.value)}>
+            <option value="">No project link</option>
+            {(projects ?? []).map(project => <option key={project.id} value={project.id}>{project.nom}</option>)}
+          </select>
+        </Field>
+        <Field label="Priority">
+          <select className={inputCls} value={priority} onChange={event => setPriority(event.target.value as PlanningTask["priority"])}>
+            <option value="low">Low</option><option value="normal">Normal</option><option value="high">High</option><option value="critical">Critical</option>
+          </select>
+        </Field>
+      </div>
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Due date"><input type="date" className={inputCls} value={dueDate} onChange={event => setDueDate(event.target.value)} /></Field>
+        <Field label="Duration (hours)" required><input type="number" min="0.25" max="80" step="0.25" className={inputCls} required value={duration} onChange={event => setDuration(event.target.value)} /></Field>
+      </div>
+      <Field label="Required skills" hint="Comma-separated; matched exactly against MIS staff competencies.">
+        <input className={inputCls} value={skills} onChange={event => setSkills(event.target.value)} placeholder="soil science, calibration" />
+      </Field>
+      {(equipment ?? []).length > 0 && (
+        <Field label="Required equipment" hint="Only operational equipment can be proposed.">
+          <div className="grid grid-cols-2 gap-2 pt-1">
+            {equipment?.map(item => (
+              <label key={item.id} className="flex gap-2 text-xs text-foreground items-center">
+                <input type="checkbox" checked={equipmentIds.includes(item.id)} onChange={() => setEquipmentIds(current => current.includes(item.id) ? current.filter(id => id !== item.id) : [...current, item.id])} />
+                <span className={item.etat === "operationnel" ? "" : "text-muted-foreground"}>{item.nom} ({item.etat})</span>
+              </label>
+            ))}
+          </div>
+        </Field>
+      )}
+      <FormError error={createTask.error} />
+      <SubmitButton pending={createTask.isPending} label="Add planning task" />
+    </form>
+  );
+}
+
+function PlanningPanel() {
+  const [adding, setAdding] = useState(false);
+  const { data: tasks } = usePlanningTasks();
+  const { data: proposals } = usePlanningProposals();
+  const generate = useGeneratePlanningProposal();
+  const approve = useApprovePlanningProposal();
+  const latest = proposals?.[0];
+
+  return (
+    <section className="mb-6 bg-card border border-border rounded-2xl p-5">
+      <div className="flex items-start justify-between gap-3 flex-wrap">
+        <div>
+          <h3 className="font-bold text-foreground font-jakarta">Reviewed Lab Planning</h3>
+          <p className="text-xs text-muted-foreground mt-1 max-w-2xl">A transparent heuristic proposes assignments from MIS skills, availability and equipment state. It never changes staff work until a reviewer approves.</p>
+        </div>
+        <div className="flex gap-2">
+          <button onClick={() => setAdding(true)} className="px-3 py-2 text-xs font-semibold rounded-xl border border-border hover:bg-muted"><Plus size={13} className="inline mr-1" />Add task</button>
+          <button onClick={() => generate.mutate()} disabled={generate.isPending || !tasks?.some(task => task.status === "pending")} className="px-3 py-2 text-xs font-semibold rounded-xl bg-primary text-primary-foreground disabled:opacity-50"><BrainCircuit size={13} className="inline mr-1" />{generate.isPending ? "Planning…" : "Generate proposal"}</button>
+        </div>
+      </div>
+      <FormError error={generate.error} />
+      <Modal open={adding} onClose={() => setAdding(false)} title="Add a planning task" subtitle="The planner will only make a proposal; it cannot assign staff on its own.">
+        <PlanningTaskForm onDone={() => setAdding(false)} />
+      </Modal>
+
+      <div className="mt-4 grid grid-cols-1 xl:grid-cols-2 gap-4">
+        <div className="rounded-xl bg-muted/50 border border-border p-3">
+          <div className="text-[10px] uppercase tracking-wide font-semibold text-muted-foreground mb-2">Tasks</div>
+          {!tasks?.length ? <p className="text-xs text-muted-foreground">Add a real lab task to start planning.</p> : (
+            <div className="space-y-2">{tasks.slice(0, 6).map(task => <div key={task.id} className="text-xs flex justify-between gap-3"><span className="text-foreground font-medium">{task.title}</span><span className="text-muted-foreground whitespace-nowrap">{task.status}{task.assigned_personnel_id ? " · assigned" : ""}</span></div>)}</div>
+          )}
+        </div>
+        <div className="rounded-xl bg-muted/50 border border-border p-3">
+          <div className="text-[10px] uppercase tracking-wide font-semibold text-muted-foreground mb-2">Latest proposal</div>
+          {!latest ? <p className="text-xs text-muted-foreground">No proposal yet. It will expose conflicts rather than silently forcing assignments.</p> : (
+            <div className="space-y-2 text-xs">
+              <p className="text-foreground"><span className="font-semibold">{latest.proposed_assignments.length}</span> proposed assignment(s) · <span className="font-semibold">{latest.conflicts.length}</span> conflict(s)</p>
+              {latest.proposed_assignments.map(item => <p key={item.task_id} className="text-muted-foreground">{item.title} → <span className="text-foreground font-medium">{item.personnel_name}</span></p>)}
+              {latest.conflicts.map(item => <p key={item.task_id} className="text-amber-700">{item.title}: {item.reasons.join(" ")}</p>)}
+              {latest.status === "proposed" && <button onClick={() => approve.mutate(latest.id)} disabled={approve.isPending} className="mt-1 px-3 py-1.5 rounded-lg text-xs font-semibold bg-emerald-600 text-white disabled:opacity-50">{approve.isPending ? "Approving…" : "Approve conflict-free assignments"}</button>}
+              {latest.status === "approved" && <p className="text-emerald-700 font-semibold">Approved by {latest.approved_by ?? "reviewer"}</p>}
+            </div>
+          )}
+          <FormError error={approve.error} />
+        </div>
+      </div>
+    </section>
+  );
+}
+
 function AgentsPage({ setPage }: { setPage: (p: Page) => void }) {
   const [selected, setSelected] = useState<number | null>(null);
   const [triggeringEvent, setTriggeringEvent] = useState(false);
@@ -1767,6 +1936,8 @@ function AgentsPage({ setPage }: { setPage: (p: Page) => void }) {
           process and resets on restart. Agents with no routed events show as idle rather than offline.
         </span>
       </div>
+
+      <PlanningPanel />
 
       <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
         {agents.map(agent => {
@@ -1883,9 +2054,19 @@ const SIM_PRESETS: Record<string, { label: string; rainfall_factor: number; et_f
 // defaults; the form pre-fills them with those same values so what you see is
 // what gets stored. The route is guarded by require_roles("administrator") — a
 // non-admin session gets a 403, which FormError shows verbatim.
-function NewParcelForm({ onDone }: { onDone: () => void }) {
+function NewParcelForm({
+  onDone,
+  initialName = "",
+  projectId,
+  onCreated,
+}: {
+  onDone: () => void;
+  initialName?: string;
+  projectId?: string;
+  onCreated?: () => void;
+}) {
   const create = useCreateParcel();
-  const [name, setName] = useState("");
+  const [name, setName] = useState(initialName);
   const [code, setCode] = useState("");
   const [areaHa, setAreaHa] = useState("");
   const [latitude, setLatitude] = useState("");
@@ -1902,6 +2083,7 @@ function NewParcelForm({ onDone }: { onDone: () => void }) {
         e.preventDefault();
         create.mutate(
           {
+            project_id: projectId,
             name: name.trim(),
             code: code.trim(),
             area_ha: Number(areaHa),
@@ -1912,7 +2094,7 @@ function NewParcelForm({ onDone }: { onDone: () => void }) {
             field_capacity_mm: Number(fieldCapacity),
             wilting_point_mm: Number(wiltingPoint),
           },
-          { onSuccess: onDone },
+          { onSuccess: () => (onCreated ? onCreated() : onDone()) },
         );
       }}
     >
@@ -2664,9 +2846,13 @@ function ImportReadingsForm({ parcelId, onDone }: { parcelId: number; onDone: ()
 
 const IRRIGATION_METHODS = ["drip", "sprinkler", "flood", "furrow", "pivot", "manual"];
 
-function LogIrrigationForm({ parcelId, onDone }: { parcelId: number; onDone: () => void }) {
+function LogIrrigationForm({ parcelId, recommendation, onDone }: {
+  parcelId: number;
+  recommendation?: Recommendation | null;
+  onDone: () => void;
+}) {
   const [occurredAt, setOccurredAt] = useState(localNowForInput());
-  const [amount, setAmount] = useState("");
+  const [amount, setAmount] = useState(recommendation ? String(recommendation.recommended_irrigation_mm) : "");
   const [method, setMethod] = useState(IRRIGATION_METHODS[0]);
   const [recordedBy, setRecordedBy] = useState("");
   const [notes, setNotes] = useState("");
@@ -2688,6 +2874,7 @@ function LogIrrigationForm({ parcelId, onDone }: { parcelId: number; onDone: () 
       {
         parcelId,
         body: {
+          recommendation_id: recommendation?.id,
           // Naive local time, posted verbatim — same convention as readings.
           occurred_at: occurredAt,
           amount_mm: amountNum,
@@ -2702,6 +2889,12 @@ function LogIrrigationForm({ parcelId, onDone }: { parcelId: number; onDone: () 
 
   return (
     <form onSubmit={submit} className="space-y-3">
+      {recommendation && (
+        <p className="text-[11px] text-primary bg-primary/5 border border-primary/20 rounded-xl px-3 py-2">
+          Linked to approved recommendation #{recommendation.id}: {recommendation.recommended_irrigation_mm.toFixed(1)} mm advised.
+          Record the actual applied amount below; a different amount is kept as evidence, not overwritten.
+        </p>
+      )}
       <Field label="Applied at" required
         hint="Local time, recorded exactly as entered (no timezone conversion).">
         <input type="datetime-local" required value={occurredAt}
@@ -2773,13 +2966,16 @@ function LogIrrigationForm({ parcelId, onDone }: { parcelId: number; onDone: () 
 // Two consequences are stated on screen rather than left to surprise the user —
 // back-dating a reading changes nothing, and `confidence` is not an uncertainty.
 
-function RecommendationPanel({ parcelId, parcel, readingCount, latestReadingAt }: {
+function RecommendationPanel({ parcelId, parcel, readingCount, latestReadingAt, irrigationEvents, onLogApplied }: {
   parcelId: number;
   parcel?: ParcelDetail;
   readingCount: number;
   latestReadingAt?: string;
+  irrigationEvents?: IrrigationEvent[];
+  onLogApplied: (recommendation: Recommendation) => void;
 }) {
   const recommend = useRecommend();
+  const approveRecommendation = useApproveRecommendation();
   const result = recommend.data;
   const history = parcel?.latest_recommendations ?? [];
 
@@ -2824,6 +3020,7 @@ function RecommendationPanel({ parcelId, parcel, readingCount, latestReadingAt }
       )}
 
       <FormError error={recommend.error} />
+      <FormError error={approveRecommendation.error} />
 
       {result && (
         <div className="space-y-3">
@@ -2895,11 +3092,38 @@ function RecommendationPanel({ parcelId, parcel, readingCount, latestReadingAt }
           </div>
           <div className="space-y-1.5">
             {[...history].slice(0, 5).map(h => (
-              <div key={h.id} className="flex items-center gap-3 text-[11px] text-muted-foreground border-b border-border/50 last:border-0 pb-1.5 last:pb-0">
+              <div key={h.id} className="flex items-center gap-3 flex-wrap text-[11px] text-muted-foreground border-b border-border/50 last:border-0 pb-1.5 last:pb-0">
                 <span className="whitespace-nowrap">{formatDate(h.generated_at)}</span>
                 <span className="font-semibold text-foreground">{h.recommended_irrigation_mm.toFixed(1)} mm</span>
                 <span>balance {h.water_balance_mm > 0 ? "+" : ""}{h.water_balance_mm.toFixed(1)} mm</span>
-                <span className="ml-auto">score {h.confidence.toFixed(2)}</span>
+                {h.generation_mode === "automatic" && <span className="text-primary font-semibold">agent-generated</span>}
+                <span>score {h.confidence.toFixed(2)}</span>
+                {h.is_validated ? (() => {
+                  const applications = (irrigationEvents ?? []).filter(ev => ev.recommendation_id === h.id);
+                  const appliedMm = applications.reduce((total, ev) => total + ev.amount_mm, 0);
+                  return applications.length > 0 ? (
+                    <span className="ml-auto text-emerald-700 font-semibold">
+                      applied {appliedMm.toFixed(1)} mm ({(appliedMm - h.recommended_irrigation_mm) >= 0 ? "+" : ""}{(appliedMm - h.recommended_irrigation_mm).toFixed(1)} vs plan)
+                    </span>
+                  ) : h.recommended_irrigation_mm > 0 ? (
+                    <button
+                      onClick={() => onLogApplied(h)}
+                      className="ml-auto px-2 py-1 rounded-md border border-emerald-300 text-emerald-700 font-semibold hover:bg-emerald-50"
+                    >
+                      Log applied amount
+                    </button>
+                  ) : (
+                    <span className="ml-auto text-emerald-700 font-semibold">approved · no irrigation advised</span>
+                  );
+                })() : (
+                  <button
+                    onClick={() => approveRecommendation.mutate({ recommendationId: h.id, parcelId })}
+                    disabled={approveRecommendation.isPending}
+                    className="ml-auto px-2 py-1 rounded-md border border-primary/30 text-primary font-semibold hover:bg-primary/10 disabled:opacity-50"
+                  >
+                    {approveRecommendation.isPending ? "Approving…" : "Approve"}
+                  </button>
+                )}
               </div>
             ))}
           </div>
@@ -3280,6 +3504,7 @@ function IoTPage() {
   const [readingToDelete, setReadingToDelete] = useState<SensorReadingFull | null>(null);
   const [deleteResult, setDeleteResult] = useState<SensorReadingDeleteResult | null>(null);
   const [irrigationOpen, setIrrigationOpen] = useState(false);
+  const [recommendationToLog, setRecommendationToLog] = useState<Recommendation | null>(null);
   const deleteReading = useDeleteReading();
   const { data: parcels, isLoading: parcelsLoading } = useParcels();
   const effectiveId = selectedId ?? (parcels && parcels.length ? parcels[0].id : null);
@@ -3291,6 +3516,14 @@ function IoTPage() {
   const READINGS_LIMIT = 90;
   const { data: rawReadings, isLoading: readingsLoading } = useReadings(effectiveId, READINGS_LIMIT);
   const { data: irrigationEvents } = useIrrigationEvents(effectiveId);
+
+  useEffect(() => {
+    const targetId = Number(window.sessionStorage.getItem("lrste.iot.parcelId"));
+    if (targetId && parcels?.some(parcelOption => parcelOption.id === targetId)) {
+      setSelectedId(targetId);
+      window.sessionStorage.removeItem("lrste.iot.parcelId");
+    }
+  }, [parcels]);
 
   // Readings come back newest-first; charts read left-to-right chronologically.
   const readings = [...(rawReadings ?? [])].sort(
@@ -3306,7 +3539,7 @@ function IoTPage() {
 
   const flagged = readings.filter(r => r.quality_flag !== "ok");
   const latestReading = readings[readings.length - 1];
-  const window = `over ${readings.length} reading${readings.length === 1 ? "" : "s"}`;
+  const readingWindow = `over ${readings.length} reading${readings.length === 1 ? "" : "s"}`;
 
   const series = readings.map(r => ({
     t: new Date(r.recorded_at).toLocaleString("en-US", { month: "short", day: "numeric", hour: "2-digit" }),
@@ -3317,9 +3550,9 @@ function IoTPage() {
   }));
 
   const metrics = [
-    { label: "Avg Temperature", value: fmt(avg(r => r.temperature_c), "°C"), change: window, icon: Thermometer, color: "text-orange-500", bg: "bg-orange-50" },
+    { label: "Avg Temperature", value: fmt(avg(r => r.temperature_c), "°C"), change: readingWindow, icon: Thermometer, color: "text-orange-500", bg: "bg-orange-50" },
     { label: "Avg Soil Moisture", value: fmt(avg(r => r.soil_moisture_mm), " mm"), change: parcel ? `FC ${parcel.field_capacity_mm} mm` : "—", icon: Droplets, color: "text-blue-500", bg: "bg-blue-50" },
-    { label: "Avg Rainfall", value: fmt(avg(r => r.rainfall_mm), " mm"), change: window, icon: Wind, color: "text-cyan-500", bg: "bg-cyan-50" },
+    { label: "Avg Rainfall", value: fmt(avg(r => r.rainfall_mm), " mm"), change: readingWindow, icon: Wind, color: "text-cyan-500", bg: "bg-cyan-50" },
     { label: "Avg ET₀", value: fmt(avg(r => r.evapotranspiration_mm), " mm"), change: "reference ET", icon: Gauge, color: "text-purple-500", bg: "bg-purple-50" },
     { label: "Parcels Monitored", value: String(parcels?.length ?? 0), change: latestReading ? `last ${formatDate(latestReading.recorded_at)}` : "no data", icon: Radio, color: "text-emerald-600", bg: "bg-emerald-50" },
     { label: "Flagged Readings", value: String(flagged.length), change: flagged.length ? "needs review" : "all ok", icon: AlertCircle, color: flagged.length ? "text-red-500" : "text-emerald-600", bg: flagged.length ? "bg-red-50" : "bg-emerald-50" },
@@ -3374,7 +3607,7 @@ function IoTPage() {
             className="flex items-center gap-1.5 text-xs font-semibold px-3 py-1.5 rounded-xl border border-border text-foreground hover:bg-muted disabled:opacity-50 transition-colors">
             <Upload size={13} /> Import CSV
           </button>
-          <button onClick={() => setIrrigationOpen(true)} disabled={!effectiveId}
+          <button onClick={() => { setRecommendationToLog(null); setIrrigationOpen(true); }} disabled={!effectiveId}
             className="flex items-center gap-1.5 text-xs font-semibold px-3 py-1.5 rounded-xl border border-border text-foreground hover:bg-muted disabled:opacity-50 transition-colors">
             <Droplet size={13} /> Log irrigation
           </button>
@@ -3404,6 +3637,8 @@ function IoTPage() {
           parcel={parcel}
           readingCount={readings.length}
           latestReadingAt={latestReading?.recorded_at}
+          irrigationEvents={irrigationEvents}
+          onLogApplied={recommendation => { setRecommendationToLog(recommendation); setIrrigationOpen(true); }}
         />
       )}
 
@@ -3655,7 +3890,12 @@ function IoTPage() {
         title="Log an irrigation event"
         subtitle={`POST /api/twin/parcels/${effectiveId}/irrigation-events · requires researcher, reviewer or administrator`}>
         {effectiveId && (
-          <LogIrrigationForm parcelId={effectiveId} onDone={() => setIrrigationOpen(false)} />
+          <LogIrrigationForm
+            key={recommendationToLog?.id ?? "manual"}
+            parcelId={effectiveId}
+            recommendation={recommendationToLog}
+            onDone={() => { setIrrigationOpen(false); setRecommendationToLog(null); }}
+          />
         )}
       </Modal>
 
@@ -5703,7 +5943,7 @@ export default function App() {
   const renderPage = useCallback(() => {
     switch (page) {
       case "home": return <HomePage setPage={setPage} />;
-      case "dashboard": return <DashboardPage />;
+      case "dashboard": return <DashboardPage onNavigate={setPage} />;
       case "projects": return <ProjectsPage />;
       case "publications": return <PublicationsPage />;
       case "researchers": return <ResearchersPage />;
@@ -5718,7 +5958,7 @@ export default function App() {
       case "admin": return <AdminPage />;
       case "agents": return <AgentsPage setPage={setPage} />;
       case "visitor": return <VisitorPortalPage />;
-      default: return <DashboardPage />;
+      default: return <DashboardPage onNavigate={setPage} />;
     }
   }, [page]);
 
