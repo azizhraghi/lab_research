@@ -16,6 +16,7 @@ from agents.digitaltwin.models import (
 from agents.digitaltwin.services.irrigation import (
     IrrigationInput, CROP_COEFFICIENTS, calculate_irrigation_recommendation
 )
+from agents.digitaltwin.services.forecast import get_active_crop_coefficient
 from agents.digitaltwin.services.simulator import run_simulation
 
 
@@ -135,8 +136,14 @@ class DigitalTwinAgent(BaseAgent):
         if existing:
             return existing
 
-        # Run the physics model
-        kc = CROP_COEFFICIENTS.get(parcel.crop_type, 1.0)
+        # Run the physics model. The crop coefficient honours a human-applied
+        # calibration profile when one exists, so calibrating moves this number
+        # the same way it moves simulation and optimisation.
+        kc, _calibration_metadata = await get_active_crop_coefficient(
+            db=db,
+            parcel_id=parcel_id,
+            fallback=float(CROP_COEFFICIENTS.get(parcel.crop_type, 1.0)),
+        )
         inp = IrrigationInput(
             soil_moisture_mm=latest.soil_moisture_mm,
             field_capacity_mm=parcel.field_capacity_mm,
