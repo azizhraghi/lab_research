@@ -648,3 +648,8 @@ Working tree is **clean** as of 2026-08-22; commits through `f7c114c`.
 
 
 ## Standing principle
+
+No backend endpoint was fabricated. Where no data source exists (conversational RAG,
+conferences, datasets, theses, news, user management, per-agent perf/confidence), the
+code either does honest local computation, substitutes a genuinely-backed section, or
+says "Not implemented yet" with the reason and the nearest real endpoint.
