@@ -265,6 +265,22 @@ export interface OrcidSyncResult {
   links_already_present: number;
 }
 
+/** Outcome of POST /api/biblio/researchers/{id}/publications/sync/scholar.
+ *
+ * Same counting semantics as OrcidSyncResult, plus `citations_updated` —
+ * Scholar is the source that refreshes citation counts on matched rows. */
+export interface ScholarSyncResult {
+  researcher_id: number;
+  source: string;
+  scholar_id: string;
+  works_found: number;
+  publications_created: number;
+  publications_enriched: number;
+  links_created: number;
+  links_already_present: number;
+  citations_updated: number;
+}
+
 // ── MIS ───────────────────────────────────────────────────────────────
 
 export type ProjetStatut = "planifie" | "en_cours" | "termine" | "suspendu";

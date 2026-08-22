@@ -32,6 +32,7 @@ import {
   useCreateResearcher,
   useResearcherPublications,
   useSyncPublications,
+  useSyncScholarPublications,
 } from "../api/biblio";
 import { useProjets, useCreateProjet, usePersonnels, useEquipements, useBudgets,
          useCreatePersonnel, useCreateEquipement, useCreateBudget, useDeleteProjet } from "../api/mis";
@@ -1383,23 +1384,26 @@ function ResearcherPublicationsModal({
 }) {
   const publications = useResearcherPublications(researcher?.id ?? null);
   const syncPublications = useSyncPublications();
+  const syncScholarPublications = useSyncScholarPublications();
 
   // The ORCID iD is what makes the import possible at all, so the absence of
   // one is stated up front rather than left to a 400 after the user clicks.
   const orcid = researcher?.orcid_id?.trim();
+  const scholarId = researcher?.scholar_id?.trim();
   const rows = publications.data ?? [];
   const result = syncPublications.data;
+  const scholarResult = syncScholarPublications.data;
 
   return (
     <Modal
       open={researcher !== null}
       onClose={onClose}
       title={researcher ? `Publications — ${researcher.name}` : "Publications"}
-      subtitle="Imported from the public ORCID record · GET /api/biblio/researchers/{id}/publications"
+      subtitle="Imported from public ORCID / Google Scholar records · GET /api/biblio/researchers/{id}/publications"
     >
       <div className="space-y-4">
         <div className="flex items-start justify-between gap-4">
-          <div className="text-xs text-muted-foreground">
+          <div className="text-xs text-muted-foreground space-y-1">
             {orcid ? (
               <>
                 ORCID{" "}
@@ -1417,19 +1421,41 @@ function ResearcherPublicationsModal({
                 No ORCID iD on this profile — add one to import publications.
               </span>
             )}
-          </div>
-          <button
-            onClick={() => researcher && syncPublications.mutate(researcher.id)}
-            disabled={!orcid || syncPublications.isPending}
-            className="flex items-center gap-2 px-3 py-2 text-xs font-semibold rounded-xl bg-primary text-primary-foreground shadow-lg shadow-primary/20 hover:opacity-90 transition-all duration-200 disabled:opacity-40 disabled:cursor-not-allowed shrink-0"
-          >
-            {syncPublications.isPending ? (
-              <Loader2 size={14} className="animate-spin" />
+            <br />
+            {scholarId ? (
+              <>Scholar profile {scholarId}</>
             ) : (
-              <Download size={14} />
+              <span className="text-amber-600">
+                No Google Scholar ID on file — needed to import from Scholar.
+              </span>
             )}
-            Import from ORCID
-          </button>
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              onClick={() => researcher && syncScholarPublications.mutate(researcher.id)}
+              disabled={!scholarId || syncScholarPublications.isPending}
+              className="flex items-center gap-2 px-3 py-2 text-xs font-semibold rounded-xl border border-border bg-background hover:bg-muted transition-all duration-200 disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              {syncScholarPublications.isPending ? (
+                <Loader2 size={14} className="animate-spin" />
+              ) : (
+                <Download size={14} />
+              )}
+              Import from Scholar
+            </button>
+            <button
+              onClick={() => researcher && syncPublications.mutate(researcher.id)}
+              disabled={!orcid || syncPublications.isPending}
+              className="flex items-center gap-2 px-3 py-2 text-xs font-semibold rounded-xl bg-primary text-primary-foreground shadow-lg shadow-primary/20 hover:opacity-90 transition-all duration-200 disabled:opacity-40 disabled:cursor-not-allowed shrink-0"
+            >
+              {syncPublications.isPending ? (
+                <Loader2 size={14} className="animate-spin" />
+              ) : (
+                <Download size={14} />
+              )}
+              Import from ORCID
+            </button>
+          </div>
         </div>
 
         {syncPublications.isError && (
@@ -1437,6 +1463,15 @@ function ResearcherPublicationsModal({
             <AlertCircle size={14} className="shrink-0 mt-0.5" />
             <span className="break-words">
               {(syncPublications.error as Error).message}
+            </span>
+          </div>
+        )}
+
+        {syncScholarPublications.isError && (
+          <div className="flex items-start gap-2 p-3 bg-red-50 border border-red-200 rounded-xl text-xs text-red-700">
+            <AlertCircle size={14} className="shrink-0 mt-0.5" />
+            <span className="break-words">
+              {(syncScholarPublications.error as Error).message}
             </span>
           </div>
         )}
@@ -1454,6 +1489,21 @@ function ResearcherPublicationsModal({
                 ` · ${result.links_already_present} already on file`}
               {result.publications_enriched > 0 &&
                 ` · ${result.publications_enriched} enriched`}
+            </span>
+          </div>
+        )}
+
+        {scholarResult && (
+          <div className="flex items-start gap-2 p-3 bg-emerald-50 border border-emerald-200 rounded-xl text-xs text-emerald-700">
+            <CheckCircle2 size={14} className="shrink-0 mt-0.5" />
+            <span>
+              Scholar holds {scholarResult.works_found} works
+              {" · "}
+              {scholarResult.publications_created} new to the lab
+              {" · "}
+              {scholarResult.links_created} newly linked
+              {scholarResult.citations_updated > 0 &&
+                ` · ${scholarResult.citations_updated} citation counts refreshed`}
             </span>
           </div>
         )}

@@ -38,6 +38,25 @@ class OrcidSyncResponse(BaseModel):
     publications_enriched: int
     links_created: int
     links_already_present: int
+    # Scholar syncs refresh citation counts on matched rows; ORCID never does.
+    citations_updated: int = 0
+
+
+class ScholarSyncResponse(BaseModel):
+    """Outcome of POST /researchers/{id}/publications/sync/scholar.
+
+    Same counting semantics as OrcidSyncResponse, plus `citations_updated` —
+    Scholar is the source that refreshes citation counts on matched rows.
+    """
+    researcher_id: int
+    source: str
+    scholar_id: str
+    works_found: int
+    publications_created: int
+    publications_enriched: int
+    links_created: int
+    links_already_present: int
+    citations_updated: int = 0
 
 
 class IndicatorResponse(BaseModel):

@@ -64,13 +64,23 @@ def _value(node: Any, *keys: str) -> Optional[str]:
     return text or None
 
 
-def _extract_doi(summary: Dict[str, Any]) -> Optional[str]:
-    """Return the DOI from external-ids, normalised to bare lowercase form.
+def normalise_doi(raw: str) -> Optional[str]:
+    """Canonical bare-lowercase form of a DOI string, or None.
 
-    Normalising matters because this is our dedup key: the same paper arrives as
-    "10.1234/ABC", "https://doi.org/10.1234/abc" and "doi:10.1234/abc" from
-    different asserting sources, and biblio_publications.doi is UNIQUE.
+    The same paper arrives as "10.1234/ABC", "https://doi.org/10.1234/abc" and
+    "doi:10.1234/abc" depending on the asserting source, and
+    biblio_publications.doi is UNIQUE — so every loader normalises the same way.
     """
+    doi = raw.lower()
+    for prefix in ("https://doi.org/", "http://doi.org/", "doi:"):
+        if doi.startswith(prefix):
+            doi = doi[len(prefix):]
+            break
+    return doi.strip("/") or None
+
+
+def _extract_doi(summary: Dict[str, Any]) -> Optional[str]:
+    """Return the DOI from external-ids, normalised to bare lowercase form."""
     ids = _dig(summary, "external-ids", "external-id")
     if not isinstance(ids, list):
         return None
@@ -82,12 +92,7 @@ def _extract_doi(summary: Dict[str, Any]) -> Optional[str]:
         raw = _value(entry, "external-id-normalized") or _value(entry, "external-id-value")
         if not raw:
             continue
-        doi = raw.lower()
-        for prefix in ("https://doi.org/", "http://doi.org/", "doi:"):
-            if doi.startswith(prefix):
-                doi = doi[len(prefix):]
-                break
-        return doi.strip("/") or None
+        return normalise_doi(raw)
     return None
 
 

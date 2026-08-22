@@ -5,6 +5,7 @@ import type {
   Publication,
   Researcher,
   ResearcherCreate,
+  ScholarSyncResult,
 } from "./types";
 
 export function useResearchers() {
@@ -56,9 +57,8 @@ export function useResearcherPublications(id: number | null) {
 /** Import a researcher's works from their public ORCID record.
  *
  * Distinct from `useSyncResearcher`, which refreshes h-index and citation
- * counts from Scholar. This one populates the publication list itself, and is
- * the only writer the lab has for that table. Idempotent — re-running matches
- * on DOI and adds only what is new. */
+ * counts. This one populates the publication list itself. Idempotent —
+ * re-running matches on DOI and adds only what is new. */
 export function useSyncPublications() {
   const qc = useQueryClient();
   return useMutation({
@@ -71,6 +71,28 @@ export function useSyncPublications() {
       qc.invalidateQueries({
         queryKey: ["biblio", "researchers", id, "publications"],
       });
+    },
+  });
+}
+
+/** Import publications from a researcher's public Google Scholar profile.
+ *
+ * Fills the same table as the ORCID import (same DOI dedup), and additionally
+ * refreshes citation counts — Scholar is the source that reports them. Expect a
+ * 400 with the reason if Scholar blocks the unproxied request. */
+export function useSyncScholarPublications() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: number) =>
+      apiFetch<ScholarSyncResult>(
+        `/api/biblio/researchers/${id}/publications/sync/scholar`,
+        { method: "POST" },
+      ),
+    onSuccess: (_data, id) => {
+      qc.invalidateQueries({
+        queryKey: ["biblio", "researchers", id, "publications"],
+      });
+      qc.invalidateQueries({ queryKey: ["biblio", "researchers"] });
     },
   });
 }

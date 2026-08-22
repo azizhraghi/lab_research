@@ -9,10 +9,14 @@ from shared.security import require_roles
 from agents.bibliometrie.models import Researcher, Publication, BiblioIndicator, CVProfile, ResearcherPublication
 from agents.bibliometrie.schemas import (
     ResearcherCreate, ResearcherResponse,
-    PublicationResponse, CVProfileResponse, OrcidSyncResponse
+    PublicationResponse, CVProfileResponse, OrcidSyncResponse, ScholarSyncResponse
 )
 from agents.bibliometrie.services.orcid_sync import OrcidUnavailable
-from agents.bibliometrie.services.publication_sync import sync_orcid_publications
+from agents.bibliometrie.services.scholar_sync import ScholarUnavailable
+from agents.bibliometrie.services.publication_sync import (
+    sync_orcid_publications,
+    sync_scholar_publications,
+)
 from agents.bibliometrie.services.cv_generator import generate_cv_pdf, generate_cv
 from agents.bibliometrie.agent import bibliometrie_agent
 from fastapi.responses import FileResponse
@@ -105,6 +109,40 @@ async def sync_researcher_publications(researcher_id: int, db: AsyncSession = De
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     return OrcidSyncResponse(orcid_id=researcher.orcid_id, **result)
+
+
+@router.post(
+    "/researchers/{researcher_id}/publications/sync/scholar",
+    response_model=ScholarSyncResponse,
+    dependencies=[Depends(require_roles("researcher", "reviewer", "administrator"))],
+)
+async def sync_researcher_scholar_publications(researcher_id: int, db: AsyncSession = Depends(get_db)):
+    """Import a researcher's works from their public Google Scholar profile.
+
+    Same idempotency contract as the ORCID route (DOI then title+year match).
+    Scholar additionally refreshes citation counts on every row it matches —
+    unlike ORCID, counts are the point. Scholar blocks unproxied automation
+    aggressively; the agent configures ScraperAPI at startup when a key exists,
+    and a block surfaces here as a 400 with the reason, not an empty success.
+    """
+    researcher = await db.get(Researcher, researcher_id)
+    if researcher is None:
+        raise HTTPException(status_code=404, detail=f"Researcher {researcher_id} not found")
+    if not researcher.scholar_id:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"{researcher.name} has no Google Scholar ID on file. Add one to "
+                "the profile before syncing publications."
+            ),
+        )
+
+    try:
+        result = await sync_scholar_publications(db, researcher)
+    except ScholarUnavailable as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return ScholarSyncResponse(scholar_id=researcher.scholar_id, **result)
 
 
 @router.get("/researchers/{researcher_id}/cv/pdf")

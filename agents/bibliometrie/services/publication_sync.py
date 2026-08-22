@@ -19,8 +19,11 @@ a work has none (theses, reports, some conference papers) we compare on
 lowercased title plus year, which is imperfect but beats inserting a duplicate
 on every run. Re-running a sync must be idempotent.
 
-`citation_count` is deliberately left alone: ORCID does not report citations, so
-overwriting it with 0 would destroy whatever Scopus/Scholar recorded.
+`citation_count` is only written by sources that actually report citations:
+ORCID does not (works carry no count, so existing values are left alone —
+overwriting with 0 would destroy whatever Scopus/Scholar recorded), while
+Scholar does, and its count is the point of syncing from it. When a work
+carries a count, the most recent sync's value wins.
 """
 from __future__ import annotations
 
@@ -99,12 +102,13 @@ async def upsert_works_for_researcher(
     db: AsyncSession,
     researcher: Researcher,
     works: List[Dict[str, Any]],
+    source: str = "orcid",
 ) -> Dict[str, Any]:
     """Load fetched works, sharing publication rows across co-authors.
 
     Commits once at the end so a partial failure leaves nothing half-written.
     """
-    created = updated = linked = already_linked = 0
+    created = updated = linked = already_linked = citations_updated = 0
     # Two works in one payload can resolve to the same row (e.g. duplicate DOIs
     # from different asserting sources). Cache to avoid a second insert attempt
     # against the UNIQUE doi constraint within a single flush.
@@ -123,13 +127,20 @@ async def upsert_works_for_researcher(
                 journal=work.get("journal"),
                 year=work.get("year"),
                 type=work.get("type"),
-                source=work.get("source", "orcid"),
+                source=work.get("source", source),
                 citation_count=0,
             )
             db.add(publication)
             created += 1
         elif _enrich(publication, work):
             updated += 1
+
+        # Only citation-reporting sources (Scholar) write this; ORCID works
+        # carry no count and leave existing values untouched.
+        incoming_citations = work.get("citation_count")
+        if incoming_citations is not None and publication.citation_count != incoming_citations:
+            publication.citation_count = incoming_citations
+            citations_updated += 1
 
         seen[key] = publication
         # Needed before linking: a freshly added row has no id until flushed.
@@ -143,12 +154,13 @@ async def upsert_works_for_researcher(
     await db.commit()
     return {
         "researcher_id": researcher.id,
-        "source": "orcid",
+        "source": source,
         "works_found": len(works),
         "publications_created": created,
         "publications_enriched": updated,
         "links_created": linked,
         "links_already_present": already_linked,
+        "citations_updated": citations_updated,
     }
 
 
@@ -161,4 +173,22 @@ async def sync_orcid_publications(
     ORCID iD from a record that genuinely lists no works.
     """
     works = await fetch_orcid_works(researcher.orcid_id or "")
-    return await upsert_works_for_researcher(db, researcher, works)
+    return await upsert_works_for_researcher(db, researcher, works, source="orcid")
+
+
+async def sync_scholar_publications(
+    db: AsyncSession, researcher: Researcher
+) -> Dict[str, Any]:
+    """Fetch a researcher's Google Scholar publications and load them.
+
+    Propagates ScholarUnavailable so the caller can distinguish a rate-limit or
+    block from a profile that genuinely lists no works. Scholar is also the
+    source that refreshes citation counts on rows it matches.
+    """
+    from agents.bibliometrie.services.scholar_sync import (
+        ScholarUnavailable,
+        fetch_scholar_works,
+    )
+
+    works = await fetch_scholar_works(researcher.scholar_id or "")
+    return await upsert_works_for_researcher(db, researcher, works, source="scholar")
