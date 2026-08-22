@@ -398,18 +398,10 @@ export function useApproveRecommendation() {
   });
 }
 
-/** Run the digital-twin scenario simulation (POST /api/twin/parcels/{id}/simulate). */
-export function useRunTwinSimulation() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: (id: number) =>
-      apiFetch(`/api/twin/parcels/${id}/simulate`, {
-        method: "POST",
-        body: JSON.stringify({}),
-      }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["twin"] }),
-  });
-}
+// useRunTwinSimulation (POST /api/twin/parcels/{id}/simulate) was removed from
+// the frontend: the twin page runs scenarios through POST /api/simulation/
+// parcels/{id}/runs instead, and nothing ever called this hook. The backend
+// route remains available for API consumers.
 
 export function useSimulationRuns(parcelId?: number | null) {
   return useQuery<SimulationRun[]>({
