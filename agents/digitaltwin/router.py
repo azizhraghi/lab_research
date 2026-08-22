@@ -224,6 +224,9 @@ async def list_readings(
     limit: int = Query(60, ge=1, le=365),
     db: AsyncSession = Depends(get_db),
 ):
+    parcel = await db.get(Parcel, parcel_id)
+    if not parcel:
+        raise HTTPException(status_code=404, detail="Parcel not found")
     result = await db.execute(
         select(SensorReading)
         .where(SensorReading.parcel_id == parcel_id)
@@ -444,6 +447,9 @@ async def list_irrigation_events(
     limit: int = Query(60, ge=1, le=365),
     db: AsyncSession = Depends(get_db),
 ):
+    parcel = await db.get(Parcel, parcel_id)
+    if not parcel:
+        raise HTTPException(status_code=404, detail="Parcel not found")
     result = await db.execute(
         select(IrrigationEvent)
         .where(IrrigationEvent.parcel_id == parcel_id)
@@ -534,6 +540,9 @@ async def list_calibrations(
     limit: int = Query(10, ge=1, le=100),
     db: AsyncSession = Depends(get_db),
 ):
+    parcel = await db.get(Parcel, parcel_id)
+    if not parcel:
+        raise HTTPException(status_code=404, detail="Parcel not found")
     result = await db.execute(
         select(CalibrationProfile)
         .where(CalibrationProfile.parcel_id == parcel_id)
