@@ -1,3 +1,5 @@
+from contextlib import asynccontextmanager
+
 from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -23,28 +25,8 @@ import agents.mis.models  # noqa: F401
 import agents.orchestrateur.models  # noqa: F401
 import agents.qualite.models  # noqa: F401
 
-app = FastAPI(
-    title=settings.PROJECT_NAME,
-    version=settings.VERSION,
-    description="API Gateway for Research Laboratory AI Agents Platform",
-)
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-        "http://localhost:5174",
-        "http://127.0.0.1:5174",
-    ],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-
-@app.on_event("startup")
-async def on_startup():
+@asynccontextmanager
+async def lifespan(app: FastAPI):
     """Create a local schema only when explicitly requested for development."""
     if settings.CREATE_SCHEMA_ON_STARTUP:
         async with engine.begin() as conn:
@@ -68,6 +50,29 @@ async def on_startup():
             await agent.start()
         except Exception as e:
             print(f"[startup] Agent {agent.name} start failed (non-fatal): {e}")
+
+    yield
+
+
+app = FastAPI(
+    title=settings.PROJECT_NAME,
+    version=settings.VERSION,
+    description="API Gateway for Research Laboratory AI Agents Platform",
+    lifespan=lifespan,
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "http://localhost:5174",
+        "http://127.0.0.1:5174",
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 protected = [Depends(get_current_user)]
