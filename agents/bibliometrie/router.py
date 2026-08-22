@@ -16,6 +16,7 @@ from agents.bibliometrie.services.publication_sync import sync_orcid_publication
 from agents.bibliometrie.services.cv_generator import generate_cv_pdf, generate_cv
 from agents.bibliometrie.agent import bibliometrie_agent
 from fastapi.responses import FileResponse
+from starlette.background import BackgroundTask
 
 router = APIRouter()
 
@@ -145,17 +146,26 @@ async def download_cv_pdf(researcher_id: int, db: AsyncSession = Depends(get_db)
         } for p in publications]
     }
     
+    # Write to the OS temp dir and delete after the response is sent — the
+    # repo-root tmp_cv_{id}.pdf files this replaced were never cleaned up.
     import os
-    output_path = f"tmp_cv_{researcher_id}.pdf"
-    
+    import tempfile
+    fd, output_path = tempfile.mkstemp(suffix=".pdf", prefix=f"lrste_cv_{researcher_id}_")
+    os.close(fd)
+
     try:
         await generate_cv_pdf(data, output_path)
         return FileResponse(
-            output_path, 
-            media_type="application/pdf", 
-            filename=f"CV_{researcher.name.replace(' ', '_')}.pdf"
+            output_path,
+            media_type="application/pdf",
+            filename=f"CV_{researcher.name.replace(' ', '_')}.pdf",
+            background=BackgroundTask(os.remove, output_path),
         )
     except Exception as e:
+        try:
+            os.remove(output_path)
+        except OSError:
+            pass
         raise HTTPException(status_code=500, detail=str(e))
 
 
