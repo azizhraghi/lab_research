@@ -15,8 +15,13 @@ class SourceCreate(SourceBase):
 class SourceResponse(SourceBase):
     id: int
     last_scraped: Optional[datetime.datetime] = None
-    
+
     model_config = ConfigDict(from_attributes=True)
+
+class SourceDeleteResponse(BaseModel):
+    deleted_id: int
+    name: str
+    type: str
 
 class ArticleTagSchema(BaseModel):
     tag: str

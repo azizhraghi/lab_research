@@ -46,3 +46,17 @@ export function useCreateSource() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ["veille", "sources"] }),
   });
 }
+
+/** Delete an unused source. The server refuses with 409 while any collected
+ * articles remain, so the error message is what the user needs to read. */
+export function useDeleteSource() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: number) =>
+      apiFetch<{ deleted_id: number; name: string; type: string }>(
+        `/api/veille/sources/${id}`,
+        { method: "DELETE" },
+      ),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["veille", "sources"] }),
+  });
+}

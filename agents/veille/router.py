@@ -1,13 +1,13 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, func
 from sqlalchemy.orm import selectinload
 from typing import List
 
 from shared.database import get_db
 from shared.security import require_roles
 from agents.veille.models import Article, Source, AlertRule
-from agents.veille.schemas import ArticleResponse, SourceResponse, SourceCreate
+from agents.veille.schemas import ArticleResponse, SourceResponse, SourceCreate, SourceDeleteResponse
 
 router = APIRouter()
 
@@ -50,6 +50,44 @@ async def list_sources(db: AsyncSession = Depends(get_db)):
     stmt = select(Source)
     result = await db.execute(stmt)
     return result.scalars().all()
+
+
+@router.delete(
+    "/sources/{source_id}",
+    response_model=SourceDeleteResponse,
+    dependencies=[Depends(require_roles("reviewer", "administrator"))],
+)
+async def delete_source(source_id: int, db: AsyncSession = Depends(get_db)):
+    """Remove a source, but only while nothing was collected from it.
+
+    Articles carry no cascade from their source, on purpose: a feed that
+    collected months of literature must not be destroyed by deleting its
+    configuration. Refuses with 409 naming the count; deleting the articles
+    themselves is a separate deliberate act. Roles are a notch above create
+    (reviewer/administrator rather than researcher-inclusive).
+    """
+    source = await db.get(Source, source_id)
+    if not source:
+        raise HTTPException(status_code=404, detail=f"Source {source_id} not found")
+
+    count_result = await db.execute(
+        select(func.count()).select_from(Article).where(Article.source_id == source_id)
+    )
+    article_count = count_result.scalar_one()
+    if article_count:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Source '{source.name}' still has {article_count} collected "
+                "articles. This refuses rather than cascading so collected "
+                "literature cannot be lost by mistake."
+            ),
+        )
+
+    name, source_type = source.name, source.type
+    await db.delete(source)
+    await db.commit()
+    return SourceDeleteResponse(deleted_id=source_id, name=name, type=source_type)
 
 @router.post("/trigger", dependencies=[Depends(require_roles("researcher", "reviewer", "administrator"))])
 async def trigger_collection(db: AsyncSession = Depends(get_db)):

@@ -25,7 +25,7 @@ import {
 import { useAuth } from "../auth/AuthContext";
 import type { Article, Researcher as ApiResearcher, HistoriqueEvenement, Projet, Personnel, Equipement, Parcel, ParcelDetail, SensorReadingFull, CalibrationProfile, Alerte, IrrigationEvent, Recommendation, PlanningTask } from "../api/types";
 import { API_BASE_URL } from "../lib/apiClient";
-import { useArticles, useTriggerScrape, useSources, useCreateSource } from "../api/veille";
+import { useArticles, useTriggerScrape, useSources, useCreateSource, useDeleteSource } from "../api/veille";
 import {
   useResearchers,
   useSyncResearcher,
@@ -4112,6 +4112,7 @@ function WatchPage() {
   const { data: articles, isLoading, error, refetch } = useArticles();
   const { data: sources } = useSources();
   const trigger = useTriggerScrape();
+  const deleteSource = useDeleteSource();
   const [addOpen, setAddOpen] = useState(false);
   const activeSources = (sources ?? []).filter(s => s.active);
 
@@ -4202,9 +4203,28 @@ function WatchPage() {
                   <span className="text-[10px] text-muted-foreground w-20 text-right">
                     {s.last_scraped ? formatDate(s.last_scraped) : "never run"}
                   </span>
+                  <button
+                    onClick={() => {
+                      if (window.confirm(`Delete source "${s.name}"? The server refuses while it still has collected articles.`))
+                        deleteSource.mutate(s.id);
+                    }}
+                    disabled={deleteSource.isPending && deleteSource.variables === s.id}
+                    title="Delete this source"
+                    className="p-1.5 rounded-lg text-muted-foreground hover:text-red-600 hover:bg-red-50 transition-colors disabled:opacity-40"
+                  >
+                    {deleteSource.isPending && deleteSource.variables === s.id
+                      ? <Loader2 size={13} className="animate-spin" />
+                      : <Trash2 size={13} />}
+                  </button>
                 </div>
               </div>
             ))}
+          </div>
+        )}
+
+        {deleteSource.isError && (
+          <div className="mt-3">
+            <FormError error={deleteSource.error} />
           </div>
         )}
 
