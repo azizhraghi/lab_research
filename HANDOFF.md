@@ -1,9 +1,56 @@
 # Session handoff — "make the platform actually work"
 
-Last updated: 2026-08-21. Keep this file current at the end of every session so a
+Last updated: 2026-08-22. Keep this file current at the end of every session so a
 fresh session can resume without replaying the whole conversation.
 
-## 2026-08-21 (latest) — planning, alert context, and the MIS→twin chain
+## 2026-08-22 (latest) — audit-driven quick wins: deletes, honesty fixes, Scholar ETL
+
+Started by committing the previous session's uncommitted planning/linking work
+(as-is, 81 ops), then worked the audit's priority list. Operation count
+**81 → 79** (6 legacy routes removed, 5 real ones added).
+
+- **404 on missing parents** — `GET /readings`, `/irrigation-events`,
+  `/calibrations` returned `[]` + 200 for a parcel that doesn't exist. Now 404,
+  so "empty" means "no data" again. (Retires pending #4.)
+- **`/recommend` honours calibration** — it read the static CROP_COEFFICIENTS
+  table while simulation/optimisation used `get_active_crop_coefficient`;
+  applying a calibration now moves the headline number too. (Retires #5.)
+- **CV PDFs stop leaking files** — `tmp_cv_{id}.pdf` in the repo root, never
+  deleted, not gitignored. Now `mkstemp` + `BackgroundTask(os.remove)`, with
+  cleanup on the failure path too. (Retires #3.)
+- **Scholar publication import** (`scholar_sync.py` was dead code, like ORCID
+  once was) — reuses `upsert_works_for_researcher`; DOI-normalised dedup,
+  shared rows, idempotent. One policy difference: Scholar *reports* citations,
+  so its sync refreshes `citation_count` on matched rows; ORCID still never
+  touches counts. Failed fetches raise `ScholarUnavailable` → 400 with the
+  reason (rate-limit ≠ "no works"). Frontend: "Import from Scholar" button in
+  the publications modal. (Retires #2.)
+- **DELETE /veille/sources/{id}** — refuses with 409 + count while articles
+  exist (parcel-delete contract). DELETE /biblio/researchers/{id} — refuses
+  while publication links exist; indicators/CV profile go with the profile.
+  PUT /biblio/researchers/{id} — partial update, UNIQUE collisions → 409
+  naming the column. Frontend edit modal + confirm-guarded deletes.
+  (Completes #1 alongside the earlier reading/parcel deletes.)
+- **Legacy JSON profile system removed** (retires #6) — `/api/biblio/profiles/*`
+  (6 endpoints), `data/researchers.json` (fabricated, deleted from disk), and
+  the agent's JSON CRUD. The veille→biblio handler no longer appends to that
+  dead file: an article **with a DOI** whose authors match DB researchers
+  becomes a real `biblio_publications` row (source=veille) through the same
+  upsert. DOI-less articles are skipped — an RSS title is not bibliographic
+  evidence. Verified live: event → bus → linked row; re-fire → still 1 row.
+- **Orchestrator `/trigger` publishes to the bus** instead of calling
+  `handle_event` directly — manual triggers now exercise the full fanout path
+  (this is how the veille→biblio chain was actually verified).
+- **`@app.on_event` → lifespan** (retires #7); **celery dropped** from
+  requirements + venv, nothing imported it (retires #10);
+  **requirements/locked.txt** pins the exact environment (retires #11).
+- Removed the last orphaned frontend hook (`useRunTwinSimulation`).
+
+All verified live: boot clean (no deprecation warning), 6 agents start, 79
+operations, tsc + vite build pass. Old pending #16 (orch history in-memory)
+was already stale — history is DB-backed since 5f58e396ab57.
+
+## 2026-08-21 — planning, alert context, and the MIS→twin chain
 
 One uncommitted session's worth of work, audited (statically and live) and
 committed as-is. Operation count **74 → 81**. Four features that close the loop
@@ -556,86 +603,48 @@ Ordered by value to LRSTE, not by effort. Previously-listed items now **done**:
 MIS sub-resource create hooks, `searchSuggestions`, the ArXiv/PubMed/Scopus
 fetchers, pgvector dedup, the sensor-reading ingestion UI, the reading-delete
 route, the irrigation-event log, the calibration UI (2026-08-09), the ORCID
-publications ETL + parcel delete, and the commit reattribution (2026-08-10).
-With calibration wired, **the digital-twin water workflow is complete**; the
-items below are elsewhere in the platform.
+publications ETL + parcel delete, and the commit reattribution (2026-08-10);
+the 2026-08-22 session retired old pendings #1 (veille source delete,
+researcher PUT/DELETE), #2 (Scholar ETL), #3 (CV temp files), #4 (list-route
+404s), #5 (/recommend vs calibration), #6 (JSON profiles), #7 (lifespan),
+#10 (celery) and #11 (unpinned deps).
 
-Working tree is **clean** as of 2026-08-10 and `main` is pushed — no
-uncommitted work is waiting, for the first time in three sessions.
+Working tree is **clean** as of 2026-08-22; commits through `f7c114c`.
 
-1. **Still no delete/edit on most things.** Readings and parcels now have
-   deletes; there is still no `DELETE /api/veille/sources/{id}` and no
-   `PUT`/`DELETE` on researchers. Follow the pattern now set twice: scope child
-   lookups to the parent, refuse with 409 + counts rather than cascading, and
-   return what the caller needs to know rather than a bare message.
-2. **`scholar_sync.py` is dead code**, exactly as `orcid_sync.py` was — imported
-   nowhere. Now that the publication upsert service exists
-   (`services/publication_sync.py`), wiring Scholar publications is mostly
-   reusing `upsert_works_for_researcher` with a different extractor. Scopus
-   likewise returns only metrics today.
-3. **`download_cv_pdf` writes `tmp_cv_{id}.pdf` to the repo root and never
-   deletes it**, and it is not gitignored. Harmless until now; the CV route
-   produces something genuinely useful as of this session, so it will be hit
-   more often. Use a `tempfile.NamedTemporaryFile` + `BackgroundTask` cleanup.
-4. **Three list routes skip the parent-existence check** and return `[]` with
-   HTTP 200 for a parcel that does not exist: `list_irrigation_events`,
-   `list_calibrations`, and `GET /readings`. The two new biblio routes 404
-   correctly — copy that. Cheap to fix together, and worth doing before
-   anything builds on "empty means no data".
-5. **`/recommend` ignores the calibrated crop coefficient.** It reads the static
-   `CROP_COEFFICIENTS` table while simulation and optimisation go through
-   `get_active_crop_coefficient`. Applying a calibration therefore does not move
-   the number the user actually looks at. Either route `/recommend` through the
-   active profile or state the split in the API docs — but the current
-   half-and-half is the kind of thing that quietly discredits the feature.
-6. **Remove the legacy JSON profile system.** `/api/biblio/profiles/*` (6
-   endpoints, `agents/bibliometrie/router.py:97-139`) is a parallel researcher
-   store from pre-merge code, backed by the now-gitignored `data/researchers.json`
-   of fabricated profiles. The DB-backed `/api/biblio/researchers` is the real one.
-7. **`@app.on_event("startup")` is deprecated** (`api/main.py:46`) — migrate to a
-   FastAPI lifespan handler.
-8. **InMemory bus dispatches synchronously** inside the publisher's coroutine
-   (`shared/event_bus.py:118`). Bibliometrie's Scholar call + PDF regeneration run
-   *inside the HTTP request that triggered the scrape* — a request-timeout bug, not
-   just a scaling note. Redis publish failures are also swallowed silently
-   (`:56-58`, returns `""`), so `EVENT_BUS_TYPE=redis` without Redis running means
-   agents stop communicating with no error anywhere.
-9. **Audit the veille/biblio router auth comments** before any deployment: two
-    endpoints carry "No auth required for dev testing" despite the global
-    `Depends(get_current_user)`. Confirm `DISABLE_AUTH=false` in prod — it returns
-    an `administrator` stub to every caller.
-10. **Celery decision:** `celery>=5.4.0` is still in `requirements/base.txt` with no
-    Celery app (the dead `tasks.py` files are now deleted). Stand up a real worker
-    or drop the dependency.
-11. **Dependencies are unpinned** (`>=` throughout, no lockfile) — builds are not
-    reproducible across machines.
-12. **Scope-honesty pass:** simulation is a FAO-56 water-balance bucket (not
-    SWAT/HEC-HMS/EPANET); optimisation is a constrained greedy scheduler (not
-    Bayesian/GA). Both are legitimate, useful tools for irrigation scheduling —
-    recommend relabelling the cahier des charges rather than promising engines the
-    lab likely does not need. Relabelling is a day; real engines are months.
-    **Confirmed 2026-08-10:** zero matches for EPANET/HEC-HMS/SWAT/WEAP/MODFLOW
-    in any `.py`; no `wntr`, no `flopy`, not even a stub. FAO-56 is the only
-    engine present — which is one of the four the cahier's own line 95 names,
-    and the right one for *parcelles irriguées*. Of the three promised twin
-    domains only that one exists (no *bassin versant*, no *réseaux hydrauliques*).
-13. **MIS/DigitalTwin/Simulation/Optimisation subscribe to nothing**
-    (`_setup_subscriptions` is `pass`). They are REST-only services, so creating a
-    project does not auto-create a parcel or trigger a run. The "multi-agent" claim
-    holds for 4 of 8 agents.
-14. **No anomaly detection exists anywhere**, though the cahier requires it of the
-    Ingestion IoT agent. `quality_flag` is stored on every reading and never
-    computed from anything.
-15. **`agents/mis/agent.py` is 37 lines whose only behaviour is `print()`.** None
-    of the cahier's MIS automations (reminders, budget-vs-deliverable checks,
-    reports, insights) exist. The MIS *router* is real and useful; the agent is
-    not.
-16. **Orchestrator history is in-memory** and wiped on restart, so it is not an
-    audit trail despite being presented as one.
+1. **Move the bus out of the request path.** The InMemory bus dispatches
+   synchronously inside the publisher's coroutine, so bibliometrie's Scholar
+   call runs *inside the HTTP request that triggered the scrape* — a
+   request-timeout bug, not just a scaling note. Redis publish failures are
+   also swallowed silently (`shared/event_bus.py:56-58` returns `""`), so
+   `EVENT_BUS_TYPE=redis` without Redis running means agents stop
+   communicating with no error anywhere. In-process per-subscription task
+   queue (~a day) or Redis Streams done properly.
+2. **Deploy on Postgres.** pgvector activation, the HNSW migration and the
+   conditional ORM columns have never run against actual Postgres. The lab
+   will outgrow SQLite on first multi-user week. Also resolves the one known
+   ORM/migration asymmetry: `d1f4e2a9b3c7` omits the `source_reading_id` FK
+   the ORM declares (SQLite enforces neither; Postgres enforces whatever the
+   migration says).
+3. **Anomaly detection (quality_flag is stored, never computed).** The qualite
+   agent validates readings structurally; extend with physical-range and
+   rate-of-change checks (soil moisture can't jump 40% in an hour; a sensor
+   reporting 200% is broken, not wet). Thresholds, not ML — high value for a
+   water lab, low effort.
+4. **Scope-honesty document for lab leadership.** Simulation is a FAO-56
+   water-balance bucket (not SWAT/HEC-HMS/EPANET); optimisation is a
+   constrained greedy scheduler (not Bayesian/GA). Both are the right tools
+   for *parcelles irriguées*. Relabelling the cahier is a day; real engines
+   are months. A one-page capabilities-vs-roadmap prevents the expectation
+   gap from eroding trust.
+5. **`agents/mis/agent.py` is still a 37-line print() shell.** The router is
+   real; the cahier's MIS automations (reminders, budget-vs-deliverable
+   checks) don't exist. The planning heuristic in orchestrateur is the model
+   to copy: deterministic, constraints reported, human approves.
+6. **Role-gating UX.** Buttons render for all users and 403 on click for
+   insufficient roles (approve proposal, create parcel, apply calibration).
+   Hide or disable them based on role once the frontend knows it.
+7. **Bundle size.** ~1 MB JS, single chunk. Code-split by page when it
+   matters; fine for an internal tool today.
+
 
 ## Standing principle
-
-No backend endpoint was fabricated. Where no data source exists (conversational RAG,
-conferences, datasets, theses, news, user management, per-agent perf/confidence), the
-code either does honest local computation, substitutes a genuinely-backed section, or
-says "Not implemented yet" with the reason and the nearest real endpoint.
