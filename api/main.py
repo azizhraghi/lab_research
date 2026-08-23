@@ -32,19 +32,20 @@ async def lifespan(app: FastAPI):
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
 
-    # Start agents that subscribe to the event bus. The InMemory bus dispatches
-    # synchronously (handlers run inside the publisher's coroutine), so this
-    # just registers the handlers — it does not block. A bus failure must never
-    # prevent the API from booting, so each start is individually guarded.
+    # Start agents that subscribe to the event bus. Subscribing only registers
+    # handlers — the InMemory bus dispatches via a background FIFO worker, so
+    # slow handlers run off the request path. A bus failure must never prevent
+    # the API from booting, so each start is individually guarded.
     from agents.veille.agent import veille_agent
     from agents.bibliometrie.agent import bibliometrie_agent
     from agents.mis.agent import mis_agent
     from agents.digitaltwin.agent import digital_twin_agent
     from agents.orchestrateur.agent import orchestrator_agent
     from agents.qualite.agent import qualite_agent
-    # Subscription order is significant for the synchronous in-memory bus used
-    # in development: persist the validation event before the twin reacts and
-    # emits its nested recommendation event, preserving an honest audit trail.
+    # Subscription order remains significant for the in-memory bus: its single
+    # dispatch worker calls handlers in subscription order, so qualite persists
+    # the validation event before the twin reacts and emits its nested
+    # recommendation event, preserving an honest audit trail.
     for agent in (veille_agent, bibliometrie_agent, mis_agent, orchestrator_agent, qualite_agent, digital_twin_agent):
         try:
             await agent.start()

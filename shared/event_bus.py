@@ -48,14 +48,15 @@ class RedisStreamsEventBus(EventBusBase):
         return self._redis_client
 
     async def publish(self, stream_name: str, event: Event) -> str:
-        try:
-            event_dict = event.model_dump(mode='json')
-            payload = {"data": json.dumps(event_dict)}
-            message_id = await self.redis_client.xadd(stream_name, payload)
-            return message_id
-        except Exception as e:
-            print(f"[EventBus] Redis not available, skipping publish: {e}")
-            return ""
+        """Publish to the stream, raising on failure.
+
+        A dropped event means subscribed agents silently miss work they were
+        supposed to react to, so an unreachable Redis is an error the caller
+        (and the operator) must see — never a printed line and a fake "".
+        """
+        event_dict = event.model_dump(mode='json')
+        payload = {"data": json.dumps(event_dict)}
+        return await self.redis_client.xadd(stream_name, payload)
 
     async def subscribe(self, stream_name: str, group_name: str = None,
                         consumer_name: str = None,
@@ -78,9 +79,6 @@ class RedisStreamsEventBus(EventBusBase):
         except redis.ResponseError as e:
             if "BUSYGROUP" not in str(e):
                 raise
-        except Exception as e:
-            print(f"[EventBus] Redis not available for subscribe: {e}")
-            return
 
         while True:
             try:
@@ -100,23 +98,81 @@ class RedisStreamsEventBus(EventBusBase):
                             event = Event(**event_data)
                             await actual_handler(event)
                             await self.redis_client.xack(stream_name, _group, message_id)
+            except asyncio.CancelledError:
+                raise
             except Exception as e:
-                print(f"Error processing stream {stream_name}: {e}")
+                # Consumer loop: log and keep polling rather than dying — but
+                # say it loudly; a silent consumer is a lost agent.
+                print(f"[EventBus] Redis consumer error on {stream_name}: {e}")
 
 
 # ── InMemory (from Friend 2, useful for testing) ──────────────────────
 
 class InMemoryEventBus(EventBusBase):
-    """In-memory event bus — no external dependencies, ideal for tests."""
+    """In-memory event bus — no external dependencies, ideal for tests and dev.
+
+    Publish does NOT await handlers inline. A single background worker drains a
+    FIFO queue, so a slow subscriber (bibliometrie's Scholar fetch, PDF work)
+    runs outside the coroutine that published the event — before, a scrape
+    request stayed open for the entire downstream chain it triggered.
+
+    One worker, not one task per handler, is deliberate: handlers still run in
+    subscription order (qualite persists a validation before the twin reacts to
+    it), which the guarded startup sequence in api/main.py depends on for an
+    honest audit trail. The tradeoff is head-of-line blocking between events —
+    irrelevant at dev scale, and production uses Redis Streams anyway.
+
+    Handler exceptions are logged and never kill the worker; a worker that dies
+    anyway is restarted by the next publish.
+    """
+
+    # Last-N published events kept for debugging; unbounded growth would leak
+    # on long-running dev servers. Nothing reads this yet.
+    HISTORY_LIMIT = 500
 
     def __init__(self) -> None:
         self._subscribers: dict[str, list[EventHandler]] = defaultdict(list)
         self.history: list[tuple[str, Event]] = []
+        self._queue: Optional[asyncio.Queue] = None
+        self._worker: Optional[asyncio.Task] = None
+
+    def _ensure_worker(self) -> None:
+        if self._worker is None or self._worker.done():
+            self._queue = asyncio.Queue()
+            self._worker = asyncio.create_task(self._drain())
+            self._worker.add_done_callback(self._on_worker_exit)
+
+    @staticmethod
+    def _on_worker_exit(task: asyncio.Task) -> None:
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            # Should be unreachable — handlers are individually guarded — but a
+            # dead dispatcher must at least be visible in the logs.
+            print(f"[EventBus] Dispatch worker died unexpectedly: {type(exc).__name__}: {exc}")
+
+    async def _drain(self) -> None:
+        while True:
+            stream, event = await self._queue.get()
+            try:
+                for handler in self._subscribers.get(stream, []):
+                    try:
+                        await handler(event)
+                    except Exception as e:
+                        print(
+                            f"[EventBus] Handler for '{event.type}' raised: "
+                            f"{type(e).__name__}: {e}"
+                        )
+            finally:
+                self._queue.task_done()
 
     async def publish(self, stream: str, event: Event) -> str:
         self.history.append((stream, event))
-        for handler in self._subscribers.get(stream, []):
-            await handler(event)
+        if len(self.history) > self.HISTORY_LIMIT:
+            del self.history[:-self.HISTORY_LIMIT]
+        self._ensure_worker()
+        self._queue.put_nowait((stream, event))
         return event.id
 
     async def subscribe(self, stream: str, handler: EventHandler, **kwargs) -> None:

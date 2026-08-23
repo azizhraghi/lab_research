@@ -130,10 +130,10 @@ class VeilleAgent(BaseAgent):
           1. SQLite only allows one writer — holding the write lock across the
              embedding + tagging + summarizing LLM calls (seconds each) makes the
              database effectively unavailable and triggers "database is locked".
-          2. The InMemory event bus dispatches handlers synchronously inside the
-             publisher's coroutine, and the orchestrator/bibliometrie handlers
-             open their own sessions. Those would deadlock on the write lock if we
-             held it open. Emitting the event only after the commit avoids that.
+          2. Bus handlers (orchestrateur, bibliometrie, …) open their own
+             sessions. Even with the bus's background dispatch worker, emitting
+             only after the commit guarantees a handler never waits on a write
+             lock this coroutine still holds.
         """
         stmt = select(Source).where(Source.active == True)
         result = await db.execute(stmt)
