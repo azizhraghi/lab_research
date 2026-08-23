@@ -1,9 +1,45 @@
 # Session handoff — "make the platform actually work"
 
-Last updated: 2026-08-22. Keep this file current at the end of every session so a
+Last updated: 2026-08-23. Keep this file current at the end of every session so a
 fresh session can resume without replaying the whole conversation.
 
-## 2026-08-22 (latest) — audit-driven quick wins: deletes, honesty fixes, Scholar ETL
+## 2026-08-23 (latest) — bus off the request path, computed quality flags, leadership doc
+
+Three items from the refreshed pending list. Operation count unchanged
+(**79**) — all three were behaviour fixes, not new routes.
+
+- **InMemory bus dispatch moved off the request path** (old pending #1).
+  Publish used to await every handler inline, so bibliometrie's Scholar fetch
+  ran *inside* the HTTP request that triggered the scrape. Publish now
+  enqueues to a single background FIFO worker: publish returns in ~0.5ms
+  regardless of handler runtime; handlers still run in subscription order
+  (qualite persists before the twin reacts — what the guarded startup relies
+  on); handler exceptions are logged, never kill the worker; a dead worker
+  restarts on next publish; history capped at 500 (was unbounded).
+  RedisStreamsEventBus.publish now **raises** on failure instead of printing
+  and returning "" — a dropped event means agents silently miss work; the
+  consumer loop logs loudly and keeps polling, CancelledError propagates.
+  Verified: unit test (non-blocking, order, error containment) + live chain
+  (trigger 0.16s request, veille→biblio link landed exactly once).
+- **`quality_flag` is now computed, not echoed** (old pending #3). New
+  `agents/qualite/services/anomaly.py`: physical ranges (negative impossible —
+  partly redundant with the API schema, kept for non-HTTP writers; moisture
+  > 1.5× field capacity suspect, > 400mm error; rain > 200mm / ET > 20mm
+  suspect; temperature outside [-30, 55]°C error; future timestamp error) and
+  rate-of-change (moisture rise > rain + same-day logged irrigation + 10mm
+  margin → suspect — the FAO-56 balance as a sanity check; catches unlogged
+  applications). Verdict `ok|suspect|error` is written back onto the reading
+  row, so the recommendation gate, the calibrator and the UI badges share one
+  truth; only `ok` emits `twin.reading_validated`. Verified live: clean → ok
+  → auto-recommendation; 70→110mm jump no water → suspect, no recommendation;
+  450mm → error.
+- **`docs/CAPACITES-ET-ROADMAP.md`** (old pending #4) — the scope-honesty
+  one-pager in French for lab leadership: verified capabilities, the honest
+  "what this is NOT" table vs the cahier des charges, known operational
+  limits, phased roadmap, and the two decisions leadership owns (hydrological
+  engines vs relabelling; RGPD policy).
+
+## 2026-08-22 — audit-driven quick wins: deletes, honesty fixes, Scholar ETL
 
 Started by committing the previous session's uncommitted planning/linking work
 (as-is, 81 ops), then worked the audit's priority list. Operation count
@@ -609,41 +645,31 @@ researcher PUT/DELETE), #2 (Scholar ETL), #3 (CV temp files), #4 (list-route
 404s), #5 (/recommend vs calibration), #6 (JSON profiles), #7 (lifespan),
 #10 (celery) and #11 (unpinned deps).
 
-Working tree is **clean** as of 2026-08-22; commits through `f7c114c`.
+Working tree is **clean** as of 2026-08-23; commits through `9a0343b`. The
+2026-08-23 session retired old pendings #1 (bus dispatch), #3 (anomaly
+detection) and #4 (leadership doc).
 
-1. **Move the bus out of the request path.** The InMemory bus dispatches
-   synchronously inside the publisher's coroutine, so bibliometrie's Scholar
-   call runs *inside the HTTP request that triggered the scrape* — a
-   request-timeout bug, not just a scaling note. Redis publish failures are
-   also swallowed silently (`shared/event_bus.py:56-58` returns `""`), so
-   `EVENT_BUS_TYPE=redis` without Redis running means agents stop
-   communicating with no error anywhere. In-process per-subscription task
-   queue (~a day) or Redis Streams done properly.
-2. **Deploy on Postgres.** pgvector activation, the HNSW migration and the
+1. **Deploy on Postgres.** pgvector activation, the HNSW migration and the
    conditional ORM columns have never run against actual Postgres. The lab
    will outgrow SQLite on first multi-user week. Also resolves the one known
    ORM/migration asymmetry: `d1f4e2a9b3c7` omits the `source_reading_id` FK
    the ORM declares (SQLite enforces neither; Postgres enforces whatever the
    migration says).
-3. **Anomaly detection (quality_flag is stored, never computed).** The qualite
-   agent validates readings structurally; extend with physical-range and
-   rate-of-change checks (soil moisture can't jump 40% in an hour; a sensor
-   reporting 200% is broken, not wet). Thresholds, not ML — high value for a
-   water lab, low effort.
-4. **Scope-honesty document for lab leadership.** Simulation is a FAO-56
-   water-balance bucket (not SWAT/HEC-HMS/EPANET); optimisation is a
-   constrained greedy scheduler (not Bayesian/GA). Both are the right tools
-   for *parcelles irriguées*. Relabelling the cahier is a day; real engines
-   are months. A one-page capabilities-vs-roadmap prevents the expectation
-   gap from eroding trust.
-5. **`agents/mis/agent.py` is still a 37-line print() shell.** The router is
+2. **`agents/mis/agent.py` is still a 37-line print() shell.** The router is
    real; the cahier's MIS automations (reminders, budget-vs-deliverable
    checks) don't exist. The planning heuristic in orchestrateur is the model
    to copy: deterministic, constraints reported, human approves.
-6. **Role-gating UX.** Buttons render for all users and 403 on click for
+3. **Role-gating UX.** Buttons render for all users and 403 on click for
    insufficient roles (approve proposal, create parcel, apply calibration).
-   Hide or disable them based on role once the frontend knows it.
-7. **Bundle size.** ~1 MB JS, single chunk. Code-split by page when it
+   Hide or disable them based on role once the frontend knows it. The
+   frontend has no notion of the current user's role yet.
+4. **No automated test suite.** Every chain is verified by documented manual
+   procedures (see session entries); a regression suite on the water loop and
+   the publication ETL is the prerequisite for daily lab dependence.
+5. **Sensor ingestion endpoint for IoT gateways** — readings arrive via the
+   UI (manual + CSV). An authenticated machine endpoint (API key per
+   gateway, same anomaly pipeline) is the natural next step for real sensors.
+6. **Bundle size.** ~1 MB JS, single chunk. Code-split by page when it
    matters; fine for an internal tool today.
 
 
