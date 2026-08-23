@@ -41,23 +41,34 @@ class QualiteAgent(BaseAgent):
             print(f"[{self.name}] Error handling {event.type}: {e}")
 
     async def _validate_twin_reading(self, event: Event) -> None:
-        """Gate automatic advice on explicit reading-quality checks."""
+        """Compute the reading's quality flag and gate automatic advice on it.
+
+        The flag used to be echoed straight from the client (always "ok" unless
+        someone typed otherwise). Now the qualité agent runs the physical
+        checks in services/anomaly.py — impossible values are errors,
+        extreme-but-possible ones are suspects — and writes the verdict back
+        onto the reading row. Only "ok" emits twin.reading_validated, so the
+        auto-recommendation and the calibrator (which filters on quality_flag)
+        never consume data a human has not cleared.
+        """
+        from agents.qualite.services.anomaly import verdict_for
+
         payload = event.payload
         parcel_id = payload.get("parcel_id")
         reading_id = payload.get("reading_id")
         reading = payload.get("reading") or {}
-        issues: list[str] = []
 
+        issues: list[str] = []
         if not isinstance(parcel_id, int) or not isinstance(reading_id, int):
-            issues.append("missing parcel or reading identifier")
-        if reading.get("quality_flag") != "ok":
-            issues.append("reading quality flag is not ok")
-        try:
-            recorded_at = datetime.fromisoformat(str(reading.get("recorded_at")))
-            if recorded_at > datetime.utcnow():
-                issues.append("reading timestamp is in the future")
-        except (TypeError, ValueError):
-            issues.append("reading timestamp is invalid")
+            issues.append("[error] missing parcel or reading identifier")
+
+        verdict = None
+        if not issues:
+            verdict = await self._assess_reading(parcel_id, reading_id, reading)
+            issues = verdict.issues
+
+        if verdict is not None and verdict.flag != reading.get("quality_flag", "ok"):
+            await self._persist_reading_flag(reading_id, verdict.flag)
 
         await self.emit_event("events", Event(
             id=str(uuid4()),
@@ -66,10 +77,85 @@ class QualiteAgent(BaseAgent):
             payload={
                 "parcel_id": parcel_id,
                 "reading_id": reading_id,
+                "quality_flag": verdict.flag if verdict else "error",
                 "issues": issues,
                 "review_required": True,
             },
         ))
+
+    async def _assess_reading(self, parcel_id: int, reading_id: int, reading: dict):
+        """Load the context the physical checks need, then run them.
+
+        Context: the parcel's field capacity (saturation ceiling), the previous
+        reading on the same parcel (rate-of-change baseline) and same-day
+        logged irrigation (part of the plausible-rise budget). Opening one
+        short session here is safe — the reading was committed before the
+        event was emitted, so there is no lock to wait on.
+        """
+        from sqlalchemy import select, func
+        from shared.database import AsyncSessionLocal
+        from agents.digitaltwin.models import Parcel, SensorReading, IrrigationEvent
+        from agents.qualite.services.anomaly import ReadingVerdict, verdict_for
+
+        async with AsyncSessionLocal() as db:
+            parcel = await db.get(Parcel, parcel_id)
+            field_capacity = parcel.field_capacity_mm if parcel else None
+
+            previous_row = (
+                await db.execute(
+                    select(SensorReading)
+                    .where(
+                        SensorReading.parcel_id == parcel_id,
+                        SensorReading.id != reading_id,
+                    )
+                    .order_by(SensorReading.recorded_at.desc())
+                    .limit(1)
+                )
+            ).scalar_one_or_none()
+            previous = (
+                {
+                    "soil_moisture_mm": previous_row.soil_moisture_mm,
+                    "recorded_at": previous_row.recorded_at.isoformat()
+                    if previous_row.recorded_at else None,
+                }
+                if previous_row else None
+            )
+
+            irrigation_same_day = 0.0
+            if previous is not None and reading.get("recorded_at"):
+                try:
+                    day = datetime.fromisoformat(str(reading["recorded_at"])).date()
+                    irrigation_same_day = float(
+                        (
+                            await db.execute(
+                                select(func.coalesce(func.sum(IrrigationEvent.amount_mm), 0.0)).where(
+                                    IrrigationEvent.parcel_id == parcel_id,
+                                    func.date(IrrigationEvent.occurred_at) == day,
+                                )
+                            )
+                        ).scalar_one()
+                    )
+                except (TypeError, ValueError):
+                    irrigation_same_day = 0.0
+
+            return verdict_for(
+                reading,
+                field_capacity_mm=field_capacity,
+                previous=previous,
+                irrigation_same_day_mm=irrigation_same_day,
+            )
+
+    async def _persist_reading_flag(self, reading_id: int, flag: str) -> None:
+        """Write the computed verdict onto the reading row so every consumer
+        (recommendation gate, calibrator, UI badges) sees the same truth."""
+        from shared.database import AsyncSessionLocal
+        from agents.digitaltwin.models import SensorReading
+
+        async with AsyncSessionLocal() as db:
+            row = await db.get(SensorReading, reading_id)
+            if row is not None:
+                row.quality_flag = flag
+                await db.commit()
 
     async def handle_event(self, event: Event) -> Optional[AgentAction]:
         """Handle quality validation events."""
