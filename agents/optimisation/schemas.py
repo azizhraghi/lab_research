@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -35,5 +35,33 @@ class OptimizationRunResponse(BaseModel):
     summary: Dict[str, Any]
     schedule: List[Dict[str, Any]]
     assumptions: Dict[str, Any]
+    is_approved: bool
+    approved_by: Optional[str] = None
+    approved_at: Optional[datetime] = None
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class IrrigationScheduleTaskResponse(BaseModel):
+    id: int
+    optimization_run_id: int
+    parcel_id: int
+    scheduled_date: date
+    planned_amount_mm: float
+    status: str
+    assigned_to: Optional[str] = None
+    approved_by: str
+    completed_by: Optional[str] = None
+    completed_at: Optional[datetime] = None
+    actual_amount_mm: Optional[float] = None
+    notes: Optional[str] = None
+    irrigation_event_id: Optional[int] = None
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class CompleteScheduleTaskRequest(BaseModel):
+    actual_amount_mm: float = Field(gt=0.0, le=500.0)
+    occurred_at: datetime
+    notes: Optional[str] = Field(None, max_length=2000)

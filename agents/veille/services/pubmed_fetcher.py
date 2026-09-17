@@ -4,7 +4,7 @@ PubMed is the NIH/NLM database for biomedical and life-sciences literature —
 relevant to LRSTE for water-quality, public-health and eco-toxicology angles.
 The API is two-step:
   1. esearch.fcgi  → returns a list of PMIDs for a query
-  2. esummary.fcgi → returns metadata for those PMIDs
+  2. efetch.fcgi → returns metadata and available abstracts for those PMIDs
 
 Both are XML over HTTP, no API key required (a key raises the rate limit but the
 NCBI E-utilities have a public tier of 3 req/s without one).
@@ -49,7 +49,7 @@ def _parse_pubmed_date(raw: str | None) -> datetime.datetime | None:
         token = parts[1].lower()
         # Handle ranges like "apr-may" by taking the first month.
         token = token.split("-")[0].split("–")[0]
-        month = _MONTHS.get(token[:3], 1)
+        month = int(token) if token.isdigit() else _MONTHS.get(token[:3], 1)
     # Day: third token if present and numeric.
     day = 1
     if len(parts) >= 3:
@@ -68,7 +68,7 @@ async def _esearch(term: str, max_results: int) -> List[str]:
         "db": "pubmed",
         "term": term,
         "retmax": max_results,
-        "sort": "date",
+        "sort": "pub_date",
         "retmode": "xml",
     }
     async with httpx.AsyncClient(follow_redirects=True) as client:
@@ -77,8 +77,9 @@ async def _esearch(term: str, max_results: int) -> List[str]:
             resp.raise_for_status()
             root = ET.fromstring(resp.text)
         except Exception as e:
-            print(f"[veille:pubmed] esearch error for '{term}': {e}")
-            return []
+            raise RuntimeError(f"PubMed search failed: {e}") from e
+    if root.findall(".//ERROR"):
+        raise RuntimeError("PubMed search returned an error response.")
     return [id_el.text.strip() for id_el in root.findall(".//Id") if id_el.text]
 
 
@@ -92,8 +93,7 @@ async def _esummary(pmids: List[str]) -> Dict[str, Dict[str, Any]]:
             resp.raise_for_status()
             root = ET.fromstring(resp.text)
         except Exception as e:
-            print(f"[veille:pubmed] esummary error for {len(pmids)} pmids: {e}")
-            return {}
+            raise RuntimeError(f"PubMed summary retrieval failed: {e}") from e
 
     out: Dict[str, Dict[str, Any]] = {}
     for doc in root.findall(".//DocSum"):
@@ -132,31 +132,53 @@ async def _esummary(pmids: List[str]) -> Dict[str, Dict[str, Any]]:
     return out
 
 
-async def fetch_pubmed(term: str, max_results: int = 25) -> List[Dict[str, Any]]:
-    """Search PubMed for `term` (PubMed query syntax) and return parsed entries.
+def parse_pubmed_records(xml: str) -> List[Dict[str, Any]]:
+    """Preserve structured abstract labels and inline scientific text."""
+    root = ET.fromstring(xml)
+    errors = root.findall(".//ERROR")
+    if errors:
+        raise RuntimeError("PubMed returned an error: " + "; ".join("".join(e.itertext()) for e in errors))
+    items = []
+    for record in root.findall(".//PubmedArticle"):
+        pmid = record.findtext("./MedlineCitation/PMID")
+        article = record.find("./MedlineCitation/Article")
+        if not pmid or article is None:
+            continue
+        title = "".join(article.find("ArticleTitle").itertext()).strip() if article.find("ArticleTitle") is not None else ""
+        if not title:
+            continue
+        abstracts = []
+        for section in article.findall("./Abstract/AbstractText"):
+            text = "".join(section.itertext()).strip()
+            label = section.get("Label") or section.get("NlmCategory")
+            if text:
+                abstracts.append(f"{label}: {text}" if label and label != "UNASSIGNED" else text)
+        authors = []
+        for author in article.findall("./AuthorList/Author"):
+            name = author.findtext("CollectiveName") or " ".join(filter(None, [author.findtext("ForeName"), author.findtext("LastName")]))
+            if name: authors.append(name)
+        doi = next((node.text for node in record.findall("./PubmedData/ArticleIdList/ArticleId") if node.get("IdType") == "doi"), None)
+        pubdate = article.find("./Journal/JournalIssue/PubDate")
+        date_text = None
+        if pubdate is not None:
+            date_text = pubdate.findtext("MedlineDate") or " ".join(filter(None, [pubdate.findtext("Year"),pubdate.findtext("Month"),pubdate.findtext("Day")]))
+        items.append(dict(title=title, url=f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/", abstract="\n".join(abstracts) or None,
+                          authors=authors, doi=doi, published_at=_parse_pubmed_date(date_text), source_type="pubmed"))
+    return items
 
-    Example terms:
-      - "water quality monitoring"
-      - "drinking water AND Morocco"
-      - "wastewater treatment[Title/Abstract]"
-    """
+
+async def fetch_pubmed(term: str, max_results: int = 25) -> List[Dict[str, Any]]:
+    """Search then retrieve PubMed XML including abstracts, when publicly available."""
     pmids = await _esearch(term, max_results)
     if not pmids:
         return []
-    summaries = await _esummary(pmids)
-
-    items: List[Dict[str, Any]] = []
-    for pmid in pmids:
-        s = summaries.get(pmid)
-        if not s:
-            continue
-        items.append({
-            "title": s["title"],
-            "url": f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/",
-            "abstract": None,  # esummary does not include abstracts; the article page does
-            "authors": s.get("authors", []),
-            "published_at": _parse_pubmed_date(s.get("pubdate_raw")),
-            "doi": s.get("doi"),
-            "source_type": "pubmed",
-        })
-    return items
+    import asyncio
+    await asyncio.sleep(0.35)
+    try:
+        async with httpx.AsyncClient(follow_redirects=True, timeout=30) as client:
+            response = await client.get("https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi",
+                params={"db":"pubmed", "id":",".join(pmids), "retmode":"xml", "tool":"LRSTEWatch"})
+            response.raise_for_status()
+        return parse_pubmed_records(response.text)
+    except Exception as exc:
+        raise RuntimeError(f"PubMed abstract retrieval failed ({type(exc).__name__}): {exc}") from exc

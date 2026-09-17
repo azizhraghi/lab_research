@@ -1,26 +1,81 @@
 from typing import Optional
+import asyncio
+import logging
 from uuid import uuid4
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from shared.base_agent import BaseAgent
 from shared.schemas import Event, AgentAction, ActionResult
-from agents.veille.models import Source, Article, ArticleTag, ArticleSummary
+from agents.veille.models import Source, Article, ArticleTag, ArticleSummary, CollectionRun
 from agents.veille.services.scraper import fetch_rss_feed
 from agents.veille.services.arxiv_fetcher import fetch_arxiv
 from agents.veille.services.pubmed_fetcher import fetch_pubmed
 from agents.veille.services.deduplicator import generate_embedding, is_duplicate, store_embedding
 from agents.veille.services.tagger import tag_article
 from agents.veille.services.summarizer import summarize_article
+from agents.veille.services.digests import create_due_digests
 import datetime
+
+
+logger = logging.getLogger("lrste.veille")
 
 class VeilleAgent(BaseAgent):
     name = "veille"
     permissions = ["veille.read", "veille.write"]
     requires_human_approval = []
 
+    def __init__(self):
+        super().__init__()
+        self._scheduler_task: asyncio.Task | None = None
+        self._scheduler_stop = asyncio.Event()
+
     async def _setup_subscriptions(self):
-        """Veille is event-source-only: it does not subscribe, it publishes."""
-        pass
+        """Veille publishes events and owns its single-process collection loop."""
+        from shared.config import settings
+        if not settings.VEILLE_SCHEDULER_ENABLED:
+            logger.info("veille_scheduler_disabled")
+            return
+        self._scheduler_stop.clear()
+        if self._scheduler_task is None or self._scheduler_task.done():
+            self._scheduler_task = asyncio.create_task(
+                self._collection_scheduler(), name="lrste-veille-scheduler",
+            )
+
+    async def _collection_scheduler(self) -> None:
+        """Run collection on the configured interval without blocking API requests.
+
+        Production deployments with multiple API replicas should run this job in
+        exactly one worker (or use an external scheduler); the database run log
+        makes every attempt visible either way.
+        """
+        from shared.config import settings
+        from shared.database import AsyncSessionLocal
+
+        interval = max(1, settings.VEILLE_COLLECTION_INTERVAL_HOURS) * 3600
+        while not self._scheduler_stop.is_set():
+            try:
+                await asyncio.wait_for(self._scheduler_stop.wait(), timeout=interval)
+                continue
+            except asyncio.TimeoutError:
+                pass
+            try:
+                async with AsyncSessionLocal() as db:
+                    await self.run_collection(db, trigger="scheduled")
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("scheduled_collection_failed")
+
+    async def stop(self):
+        self._scheduler_stop.set()
+        if self._scheduler_task is not None:
+            self._scheduler_task.cancel()
+            try:
+                await self._scheduler_task
+            except asyncio.CancelledError:
+                pass
+            self._scheduler_task = None
+        await super().stop()
 
     async def handle_event(self, event: Event) -> Optional[AgentAction]:
         """Handle incoming events — e.g. a manual trigger from the orchestrator."""
@@ -43,26 +98,27 @@ class VeilleAgent(BaseAgent):
     #   - pubmed: {"term": "water quality", "max_results": 25}
     #   - rss/atom: config is unused; source.url is the feed URL.
 
-    async def _fetch_source(self, source: Source) -> list[dict]:
+    async def _fetch_source(self, source: Source) -> tuple[list[dict], str | None]:
         """Dispatch to the right fetcher for this source's type."""
         try:
             if source.type in ("rss", "atom"):
-                return await fetch_rss_feed(source.url)
+                return await fetch_rss_feed(source.url), None
             if source.type == "arxiv":
                 config = source.config or {}
                 query = config.get("search_query") or source.url
                 max_results = int(config.get("max_results", 25))
-                return await fetch_arxiv(query, max_results=max_results)
+                return await fetch_arxiv(query, max_results=max_results), None
             if source.type == "pubmed":
                 config = source.config or {}
                 term = config.get("term") or source.url
                 max_results = int(config.get("max_results", 25))
-                return await fetch_pubmed(term, max_results=max_results)
+                return await fetch_pubmed(term, max_results=max_results), None
             print(f"[veille] Unknown source type '{source.type}' for '{source.name}' — skipping.")
-            return []
+            return [], f"{source.name}: unsupported source type '{source.type}'"
         except Exception as e:
-            print(f"[veille] Error fetching source '{source.name}' ({source.type}): {e}")
-            return []
+            message = f"{source.name} ({source.type}): {type(e).__name__}: {e}"
+            logger.exception("veille_source_fetch_failed", extra={"source": source.name, "source_type": source.type})
+            return [], message
 
     async def _ingest_item(
         self, db: AsyncSession, item: dict, source: Source,
@@ -72,11 +128,20 @@ class VeilleAgent(BaseAgent):
         Returns the event payload if the article was stored, or None if it was
         skipped (duplicate, no embedding, etc.).
         """
+        doi = str(item.get("doi") or "").strip() or None
+        # Embedding similarity catches semantic duplicates across feeds, while
+        # DOI is the authoritative publication identifier. Check it first so a
+        # differently worded RSS title cannot violate the unique DOI index.
+        if doi:
+            existing_doi = await db.scalar(select(Article.id).where(Article.doi == doi))
+            if existing_doi is not None:
+                return None
+
         text_for_embed = f"{item['title']} {item['abstract'] or ''}"
 
         embedding = await generate_embedding(text_for_embed)
         if not embedding:
-            return None
+            raise ValueError("Embedding service returned no vector; check Mistral configuration and quota.")
 
         if await is_duplicate(db, embedding, threshold=0.1):
             return None
@@ -84,6 +149,8 @@ class VeilleAgent(BaseAgent):
         article = Article(
             title=item['title'],
             abstract=item.get('abstract'),
+            authors=[str(author).strip() for author in (item.get("authors") or []) if str(author).strip()],
+            doi=doi,
             url=item.get('url'),
             source_id=source.id,
             published_at=item.get('published_at'),
@@ -118,7 +185,7 @@ class VeilleAgent(BaseAgent):
             "doi": item.get('doi'),
         }
 
-    async def run_collection(self, db: AsyncSession):
+    async def run_collection(self, db: AsyncSession, trigger: str = "manual") -> CollectionRun:
         """Execute a collection run across all active sources.
 
         Supports rss / atom / arxiv / pubmed source types. After committing new
@@ -135,27 +202,65 @@ class VeilleAgent(BaseAgent):
              only after the commit guarantees a handler never waits on a write
              lock this coroutine still holds.
         """
-        stmt = select(Source).where(Source.active == True)
-        result = await db.execute(stmt)
-        sources = result.scalars().all()
+        run = CollectionRun(trigger=trigger, status="running")
+        db.add(run)
+        await db.commit()
+        await db.refresh(run)
+        try:
+            stmt = select(Source).where(Source.active == True)
+            result = await db.execute(stmt)
+            sources = result.scalars().all()
+            run.source_count = len(sources)
+            articles_collected = 0
+            warnings: list[str] = []
+            successful_sources = 0
 
-        for source in sources:
-            items = await self._fetch_source(source)
-            for item in items:
-                payload = await self._ingest_item(db, item, source)
-                if payload is None:
+            for source in sources:
+                items, warning = await self._fetch_source(source)
+                if warning:
+                    warnings.append(warning)
                     continue
+                successful_sources += 1
+                for item in items:
+                    try:
+                        # A failed enrichment does not roll back other articles.
+                        async with db.begin_nested():
+                            payload = await self._ingest_item(db, item, source)
+                    except Exception as exc:
+                        warnings.append(f"{source.name}: {item.get('title', 'Article')[:100]}: {type(exc).__name__}: {exc}")
+                        continue
+                    if payload is None:
+                        continue
+                    source.last_scraped = datetime.datetime.utcnow()
+                    run.articles_collected = articles_collected = articles_collected + 1
+                    await db.commit()
+                    # Emit only after the commit so bus handlers don't contend for the lock.
+                    await self.emit_event("events", Event(
+                        id=str(uuid4()),
+                        type="veille.article_collected",
+                        source_agent="veille",
+                        payload=payload,
+                    ))
+                # Mark last_scraped even when all items were duplicates/skipped.
                 source.last_scraped = datetime.datetime.utcnow()
                 await db.commit()
-                # Emit only after the commit so bus handlers don't contend for the lock.
-                await self.emit_event("events", Event(
-                    id=str(uuid4()),
-                    type="veille.article_collected",
-                    source_agent="veille",
-                    payload=payload,
-                ))
-            # Mark last_scraped even when all items were duplicates/skipped.
-            source.last_scraped = datetime.datetime.utcnow()
+
+            run.digests_created = await create_due_digests(db)
+            run.status = ("failed" if sources and successful_sources == 0
+                          else "completed_with_warnings" if warnings else "completed")
+            run.error_message = "\n".join(warnings)[:2000] or None
+            run.completed_at = datetime.datetime.utcnow()
             await db.commit()
+            await db.refresh(run)
+            return run
+        except Exception as exc:
+            await db.rollback()
+            failed_run = await db.get(CollectionRun, run.id)
+            if failed_run is not None:
+                failed_run.status = "failed"
+                failed_run.error_message = f"{type(exc).__name__}: {exc}"[:2000]
+                failed_run.completed_at = datetime.datetime.utcnow()
+                await db.commit()
+            raise
 
 veille_agent = VeilleAgent()

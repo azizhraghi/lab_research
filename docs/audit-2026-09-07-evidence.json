@@ -1,0 +1,460 @@
+[
+  {
+    "check": "ready",
+    "result": [
+      200,
+      {
+        "status": "ready",
+        "environment": "test",
+        "event_bus": {
+          "transport": "memory",
+          "durable": false
+        },
+        "outbox": {
+          "pending": 0,
+          "dispatching": 0,
+          "delivered": 15,
+          "failed": 0
+        },
+        "agents": [
+          "veille",
+          "bibliometrie",
+          "mis",
+          "orchestrateur",
+          "qualite",
+          "digital_twin"
+        ]
+      }
+    ]
+  },
+  {
+    "check": "api_operation_count",
+    "result": 133
+  },
+  {
+    "check": "unparameterized_gets",
+    "result": {
+      "/api/veille/articles": {
+        "status": 200,
+        "count": 0
+      },
+      "/api/veille/subscriptions": {
+        "status": 200,
+        "count": 0
+      },
+      "/api/veille/inbox": {
+        "status": 200,
+        "count": 0
+      },
+      "/api/veille/runs": {
+        "status": 200,
+        "count": 0
+      },
+      "/api/veille/sources": {
+        "status": 200,
+        "count": 0
+      },
+      "/api/biblio/researchers": {
+        "status": 200,
+        "count": 0
+      },
+      "/api/twin/parcels": {
+        "status": 200,
+        "count": 4
+      },
+      "/api/twin/recommendations": {
+        "status": 200,
+        "count": 4
+      },
+      "/api/optimisation/field-tasks": {
+        "status": 200,
+        "count": 0
+      },
+      "/api/mis/projets/": {
+        "status": 200,
+        "count": 2
+      },
+      "/api/mis/personnels/": {
+        "status": 200,
+        "count": 0
+      },
+      "/api/mis/equipements/": {
+        "status": 200,
+        "count": 0
+      },
+      "/api/mis/budgets/": {
+        "status": 200,
+        "count": 0
+      },
+      "/api/mis/reservations": {
+        "status": 200,
+        "count": 0
+      },
+      "/api/mis/maintenance": {
+        "status": 200,
+        "count": 0
+      },
+      "/api/mis/workload": {
+        "status": 200,
+        "count": 0
+      },
+      "/api/mis/operational-alerts": {
+        "status": 200,
+        "count": 0
+      },
+      "/api/orchestrateur/status": {
+        "status": 200,
+        "count": null
+      },
+      "/api/orchestrateur/alertes": {
+        "status": 200,
+        "count": 3
+      },
+      "/api/orchestrateur/historique": {
+        "status": 200,
+        "count": 13
+      },
+      "/api/orchestrateur/planning/tasks": {
+        "status": 200,
+        "count": 0
+      },
+      "/api/orchestrateur/planning/proposals": {
+        "status": 200,
+        "count": 0
+      },
+      "/api/qualite/status": {
+        "status": 200,
+        "count": null
+      },
+      "/api/qualite/rapports": {
+        "status": 200,
+        "count": 0
+      },
+      "/api/qualite/measurement-reviews": {
+        "status": 200,
+        "count": 2
+      },
+      "/api/public/researchers": {
+        "status": 200,
+        "count": 0
+      },
+      "/api/public/publications": {
+        "status": 200,
+        "count": 0
+      },
+      "/api/public/projects": {
+        "status": 200,
+        "count": 0
+      },
+      "/api/public/datasets": {
+        "status": 200,
+        "count": 0
+      },
+      "/api/public/admin/publications": {
+        "status": 200,
+        "count": 0
+      },
+      "/api/public/admin/projects": {
+        "status": 200,
+        "count": 0
+      },
+      "/api/public/admin/datasets": {
+        "status": 200,
+        "count": 0
+      },
+      "/health": {
+        "status": 200,
+        "count": null
+      },
+      "/ready": {
+        "status": 200,
+        "count": null
+      },
+      "/operations/outbox": {
+        "status": 200,
+        "count": null
+      }
+    }
+  },
+  {
+    "check": "create_project",
+    "result": 200
+  },
+  {
+    "check": "update_project_date",
+    "result": [
+      500,
+      "Internal Server Error"
+    ]
+  },
+  {
+    "check": "create_parcel",
+    "result": 200
+  },
+  {
+    "check": "create_reading",
+    "result": 200
+  },
+  {
+    "check": "automatic_recommendation",
+    "result": [
+      {
+        "id": 5,
+        "parcel_id": 5,
+        "source_reading_id": 5,
+        "generation_mode": "automatic",
+        "generated_at": "2026-09-07T21:56:36.122541",
+        "water_balance_mm": -63.8,
+        "recommended_irrigation_mm": 42.0,
+        "confidence": 0.69,
+        "rationale": "Projected water reserve is 63.8 mm below the target range. Apply 42.0 mm while monitoring rainfall and sensor quality.",
+        "is_validated": false,
+        "validated_by": null
+      }
+    ]
+  },
+  {
+    "check": "application_before_approval",
+    "result": [
+      409,
+      {
+        "detail": "Recommendation must be approved before logging its application"
+      }
+    ]
+  },
+  {
+    "check": "researcher_cannot_approve",
+    "result": 403
+  },
+  {
+    "check": "admin_approval",
+    "result": 200
+  },
+  {
+    "check": "application_after_approval",
+    "result": [
+      200,
+      {
+        "id": 2,
+        "parcel_id": 5,
+        "recommendation_id": 5,
+        "occurred_at": "2026-09-07T09:00:00",
+        "amount_mm": 20.0,
+        "method": "manual",
+        "source": "field_log",
+        "notes": null,
+        "recorded_by": "AUDIT",
+        "created_at": "2026-09-07T21:56:36.334290"
+      }
+    ]
+  },
+  {
+    "check": "suspect_reading_quality",
+    "result": [
+      [
+        6,
+        "error",
+        "pending"
+      ]
+    ]
+  },
+  {
+    "check": "manual_recommend_from_suspect",
+    "result": [
+      200,
+      {
+        "id": 6,
+        "parcel_id": 5,
+        "source_reading_id": 6,
+        "generation_mode": "manual",
+        "generated_at": "2026-09-07T21:56:38.476319",
+        "water_balance_mm": 879.0,
+        "recommended_irrigation_mm": 0.0,
+        "confidence": 0.9,
+        "rationale": "Soil water reserve is within the target range; no irrigation is recommended for the next cycle.",
+        "is_validated": false,
+        "validated_by": null
+      }
+    ]
+  },
+  {
+    "check": "public_excludes_internal_project",
+    "result": [
+      200,
+      []
+    ]
+  },
+  {
+    "check": "invalid_parcel_parameters",
+    "result": 200
+  },
+  {
+    "check": "final_ready",
+    "result": [
+      200,
+      {
+        "status": "ready",
+        "environment": "test",
+        "event_bus": {
+          "transport": "memory",
+          "durable": false
+        },
+        "outbox": {
+          "pending": 0,
+          "dispatching": 0,
+          "delivered": 23,
+          "failed": 0
+        },
+        "agents": [
+          "veille",
+          "bibliometrie",
+          "mis",
+          "orchestrateur",
+          "qualite",
+          "digital_twin"
+        ]
+      }
+    ]
+  },
+  {
+    "check": "anonymous_public_get",
+    "result": 200
+  },
+  {
+    "check": "anonymous_private_get",
+    "result": 401
+  },
+  {
+    "check": "anonymous_public_admin_get",
+    "result": 401
+  },
+  {
+    "check": "rss_failure_collection_outcome",
+    "result": {
+      "status": "completed",
+      "error_message": null,
+      "articles_collected": 0
+    }
+  },
+  {
+    "check": "multiagent.db_counts",
+    "result": {
+      "alembic_version": 1,
+      "veille_alert_rules": 1,
+      "veille_sources": 0,
+      "veille_articles": 0,
+      "veille_alert_notifications": 0,
+      "veille_article_summaries": 0,
+      "veille_article_tags": 0,
+      "biblio_publications": 0,
+      "biblio_researchers": 0,
+      "biblio_cv_profiles": 0,
+      "biblio_indicators": 0,
+      "biblio_researcher_publications": 0,
+      "twin_parcels": 0,
+      "twin_sensor_readings": 0,
+      "twin_recommendations": 0,
+      "twin_simulations": 0,
+      "simulation_runs": 0,
+      "optimisation_runs": 0,
+      "twin_weather_forecasts": 0,
+      "twin_irrigation_events": 0,
+      "twin_calibration_profiles": 0,
+      "orch_alertes": 1,
+      "orch_historique": 1,
+      "qualite_rapports": 0,
+      "orch_planning_tasks": 0,
+      "orch_planning_proposals": 0,
+      "system_outbox": 1,
+      "system_event_receipts": 4,
+      "twin_sensor_devices": 0,
+      "qualite_measurement_reviews": 0,
+      "twin_irrigation_schedule_tasks": 0,
+      "veille_article_user_states": 0,
+      "veille_watch_digests": 0,
+      "veille_watch_digest_items": 0,
+      "veille_collection_runs": 2,
+      "projets": 1,
+      "personnels": 0,
+      "equipements": 0,
+      "budgets": 0,
+      "mis_project_milestones": 0,
+      "mis_project_deliverables": 0,
+      "mis_project_risks": 0,
+      "mis_budget_entries": 0,
+      "mis_equipment_reservations": 0,
+      "mis_equipment_maintenance": 0,
+      "public_researcher_profiles": 0,
+      "public_publications": 0,
+      "public_project_summaries": 0,
+      "public_datasets": 0
+    }
+  },
+  {
+    "check": "multiagent.db_reading_origins",
+    "result": []
+  },
+  {
+    "check": "lrste-demo.db_counts",
+    "result": {
+      "alembic_version": 1,
+      "veille_alert_rules": 0,
+      "veille_sources": 1,
+      "veille_articles": 1,
+      "veille_alert_notifications": 0,
+      "veille_article_summaries": 1,
+      "veille_article_tags": 2,
+      "biblio_publications": 1,
+      "biblio_researchers": 1,
+      "biblio_cv_profiles": 0,
+      "biblio_indicators": 3,
+      "biblio_researcher_publications": 1,
+      "twin_parcels": 1,
+      "twin_sensor_readings": 8,
+      "twin_recommendations": 1,
+      "twin_simulations": 0,
+      "simulation_runs": 1,
+      "optimisation_runs": 1,
+      "twin_weather_forecasts": 1,
+      "twin_irrigation_events": 1,
+      "twin_calibration_profiles": 0,
+      "orch_alertes": 0,
+      "orch_historique": 0,
+      "qualite_rapports": 0,
+      "orch_planning_tasks": 1,
+      "orch_planning_proposals": 0,
+      "system_outbox": 0,
+      "system_event_receipts": 0,
+      "twin_sensor_devices": 0,
+      "qualite_measurement_reviews": 0,
+      "twin_irrigation_schedule_tasks": 0,
+      "veille_article_user_states": 1,
+      "veille_watch_digests": 0,
+      "veille_watch_digest_items": 0,
+      "veille_collection_runs": 0,
+      "projets": 1,
+      "personnels": 1,
+      "equipements": 1,
+      "budgets": 1,
+      "mis_project_milestones": 1,
+      "mis_project_deliverables": 1,
+      "mis_project_risks": 1,
+      "mis_budget_entries": 1,
+      "mis_equipment_reservations": 1,
+      "mis_equipment_maintenance": 1,
+      "public_researcher_profiles": 1,
+      "public_publications": 1,
+      "public_project_summaries": 1,
+      "public_datasets": 1
+    }
+  },
+  {
+    "check": "lrste-demo.db_reading_origins",
+    "result": [
+      [
+        "demo",
+        8
+      ]
+    ]
+  }
+]

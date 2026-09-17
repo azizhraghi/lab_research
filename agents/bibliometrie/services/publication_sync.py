@@ -33,7 +33,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from agents.bibliometrie.models import Publication, Researcher, ResearcherPublication
-from agents.bibliometrie.services.orcid_sync import fetch_orcid_works
+from agents.bibliometrie.services.orcid_sync import fetch_orcid_works, normalise_doi
 
 # Columns worth backfilling onto a publication row that already exists but is
 # missing detail. Never overwrite a populated value with None.
@@ -115,6 +115,9 @@ async def upsert_works_for_researcher(
     seen: Dict[Tuple[str, Any], Publication] = {}
 
     for work in works:
+        work = dict(work)
+        if work.get("doi"):
+            work["doi"] = normalise_doi(work["doi"])
         key = ("doi", work["doi"]) if work.get("doi") else (
             "title", ((work.get("title") or "").lower(), work.get("year"))
         )

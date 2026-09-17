@@ -1,3 +1,12 @@
+import { LiteratureReviewWorkspace } from "./LiteratureReview";
+import { ProjectCompletion } from "./ProjectCompletion";
+import { ProjectDossier } from "./ProjectDossier";
+import { ProjectSetup } from "./ProjectSetup";
+import { BudgetLedger } from './BudgetLedger';
+import { ParcelEvidence } from "./ParcelEvidence";
+import { ResearchAttention } from "./ResearchAttention";
+import { BibliographicTrust } from "./BibliographicTrust";
+import { InstitutionalContent } from "./InstitutionalContent";
 
 import { useState, useEffect, useRef, useCallback } from "react";
 import {
@@ -22,10 +31,10 @@ import {
   AreaChart, Area, BarChart, Bar, LineChart as ReLineChart, Line,
   XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer
 } from "recharts";
-import { useAuth } from "../auth/AuthContext";
-import type { Article, Researcher as ApiResearcher, HistoriqueEvenement, Projet, Personnel, Equipement, Parcel, ParcelDetail, SensorReadingFull, CalibrationProfile, Alerte, IrrigationEvent, Recommendation, PlanningTask } from "../api/types";
+import { useAuth, useLabPermissions } from "../auth/AuthContext";
+import type { Article, Researcher as ApiResearcher, HistoriqueEvenement, Projet, Personnel, Equipement, Parcel, ParcelDetail, SensorReadingFull, CalibrationProfile, Alerte, IrrigationEvent, Recommendation, PlanningTask, MeasurementReview, OptimizationRun } from "../api/types";
 import { API_BASE_URL } from "../lib/apiClient";
-import { useArticles, useTriggerScrape, useSources, useCreateSource, useDeleteSource } from "../api/veille";
+import { useArticles, useTriggerScrape, useSources, useCreateSource, useDeleteSource, useWatchSubscriptions, useCreateWatchSubscription, useUpdateWatchSubscription, useDeleteWatchSubscription, useWatchInbox, useUpdateArticleState, useCollectionRuns } from "../api/veille";
 import {
   useResearchers,
   useSyncResearcher,
@@ -37,8 +46,13 @@ import {
   useSyncScholarPublications,
 } from "../api/biblio";
 import { useProjets, useCreateProjet, usePersonnels, useEquipements, useBudgets,
-         useCreatePersonnel, useCreateEquipement, useCreateBudget, useDeleteProjet } from "../api/mis";
-import { useQualiteStatus, useRapports, useValiderEntite, type QualiteEntite } from "../api/qualite";
+         useCreatePersonnel, useCreateEquipement, useCreateBudget, useDeleteProjet, useUpdateProjet,
+         useProjectMilestones, useCreateMilestone, useUpdateMilestone,
+         useProjectDeliverables, useCreateDeliverable, useProjectRisks, useCreateRisk,
+         useBudgetSummary, useCreateBudgetEntry, useOperationalAlerts, useMonthlyProjectReport,
+         useReservations, useCreateReservation, useApproveReservation, useMaintenance,
+         useCreateMaintenance, useWorkload } from "../api/mis";
+import { useQualiteStatus, useRapports, useValiderEntite, useMeasurementReviews, useDecideMeasurementReview, type QualiteEntite } from "../api/qualite";
 import { useOrchestratorStatus, useAlertes, useHistorique, useResolveAlerte, useTriggerEvent, usePlanningTasks, usePlanningProposals, useCreatePlanningTask, useGeneratePlanningProposal, useApprovePlanningProposal } from "../api/orchestrateur";
 import {
   useParcels,
@@ -61,8 +75,18 @@ import {
   useRecordIrrigation,
   useRecommend,
   useApproveRecommendation,
+  useSensorDevices,
+  useProvisionSensorDevice,
+  useFieldTasks,
+  useApproveOptimisationRun,
+  useCompleteFieldTask,
 } from "../api/digitaltwin";
 import type { SensorReadingDeleteResult } from "../api/digitaltwin";
+import {
+  usePublicDatasets, usePublicProjects, usePublicPublications, usePublicResearchers,
+  useCuratedDatasets, useCuratedProjects, useSetPublicDatasetStatus,
+  useSetPublicProjectStatus, useSubmitPublicDataset, useSubmitPublicProject,
+} from "../api/public";
 
 // ─── Types ─────────────────────────────────────────────────────────────────
 type Page =
@@ -330,8 +354,9 @@ function FormError({ error }: { error: unknown }) {
 }
 
 function SubmitButton({ pending, label }: { pending: boolean; label: string }) {
+  const { canWrite } = useLabPermissions();
   return (
-    <button type="submit" disabled={pending}
+    <button type="submit" disabled={pending || !canWrite} title={!canWrite ? "Read-only account" : undefined}
       className="flex items-center justify-center gap-2 px-4 py-2 text-sm font-semibold rounded-xl bg-primary text-primary-foreground shadow-lg shadow-primary/20 hover:opacity-90 disabled:opacity-50 transition-all duration-200">
       {pending ? <Loader2 size={15} className="animate-spin" /> : <Plus size={15} />}
       {pending ? "Saving…" : label}
@@ -340,7 +365,8 @@ function SubmitButton({ pending, label }: { pending: boolean; label: string }) {
 }
 
 // ─── Data ───────────────────────────────────────────────────────────────────
-// The eight backend agents. `key` is each agent's own `name` attribute (see
+// Six agents participate in the event network; simulation and optimisation
+// are started on demand. `key` is each agent's own `name` attribute (see
 // agents/<dir>/agent.py) — that value travels on every event as `source_agent`,
 // so it is how we match live orchestrator telemetry to a card. Note that
 // digital_twin uses an underscore while its directory is `digitaltwin` and its
@@ -348,24 +374,24 @@ function SubmitButton({ pending, label }: { pending: boolean; label: string }) {
 // numbers on each card come from the orchestrator's event history at runtime.
 const agents: {
   id: number; key: string; name: string; icon: React.ElementType;
-  desc: string; endpoint: string; page: Page;
+  desc: string; endpoint: string; page: Page; mode: "event-driven" | "on-demand";
 }[] = [
   { id: 1, key: "veille", name: "Scientific Watch Agent", icon: Eye, endpoint: "/api/veille", page: "watch",
-    desc: "Fetches RSS/Atom and PubMed sources, embeds and de-duplicates articles, then tags and summarises them." },
+    desc: "Fetches RSS/Atom and PubMed sources, embeds and de-duplicates articles, then tags and summarises them.", mode: "event-driven" },
   { id: 2, key: "bibliometrie", name: "Bibliometric Agent", icon: BookOpen, endpoint: "/api/biblio", page: "researchers",
-    desc: "Resolves researcher metrics via Google Scholar → Semantic Scholar → OpenAlex and regenerates CV PDFs." },
+    desc: "Resolves researcher metrics via Google Scholar → Semantic Scholar → OpenAlex and regenerates CV PDFs.", mode: "event-driven" },
   { id: 3, key: "digital_twin", name: "Digital Twin / IoT Agent", icon: Wifi, endpoint: "/api/twin", page: "iot",
-    desc: "Ingests parcel sensor readings, flags data-quality issues, pulls forecasts and issues irrigation advice." },
+    desc: "Ingests parcel sensor readings, flags data-quality issues, pulls forecasts and issues irrigation advice.", mode: "event-driven" },
   { id: 4, key: "simulation", name: "Simulation Agent", icon: Cpu, endpoint: "/api/simulation", page: "twins",
-    desc: "Runs baseline-versus-scenario water-balance projections over a configurable day horizon." },
+    desc: "Runs baseline-versus-scenario water-balance projections when a researcher starts a scenario.", mode: "on-demand" },
   { id: 5, key: "optimisation", name: "Optimization Agent", icon: Target, endpoint: "/api/optimisation", page: "twins",
-    desc: "Computes irrigation schedules under daily-maximum and total-quota constraints." },
+    desc: "Computes constrained irrigation schedules when a researcher requests an optimisation run.", mode: "on-demand" },
   { id: 6, key: "mis", name: "MIS Agent", icon: Database, endpoint: "/api/mis", page: "projects",
-    desc: "Manages projects, staff, equipment and budgets, emitting an event on every change." },
+    desc: "Manages projects, staff, equipment and budgets, emitting an event on every change.", mode: "event-driven" },
   { id: 7, key: "qualite", name: "Quality Agent", icon: Shield, endpoint: "/api/qualite", page: "admin",
-    desc: "Validates MIS entities for completeness and GDPR compliance, producing conformity reports." },
+    desc: "Validates MIS entities for completeness and GDPR compliance, producing conformity reports.", mode: "event-driven" },
   { id: 8, key: "orchestrateur", name: "Orchestrator Agent", icon: Network, endpoint: "/api/orchestrateur", page: "agents",
-    desc: "Routes every event through its rule table, raises alerts and keeps the shared event history." },
+    desc: "Routes every event through its rule table, raises alerts and keeps the shared event history.", mode: "event-driven" },
 ];
 
 // ─── Sidebar ────────────────────────────────────────────────────────────────
@@ -378,12 +404,12 @@ function Sidebar({ page, setPage, collapsed, setCollapsed, dark }: {
     { icon: FolderKanban, label: "Research Projects", page: "projects" },
     { icon: BookOpen, label: "Publications", page: "publications" },
     { icon: Users, label: "Researchers", page: "researchers" },
-    { icon: GraduationCap, label: "Theses & Masters", page: "theses" },
+    { icon: GraduationCap, label: "Theses", page: "theses" },
     { icon: Eye, label: "Scientific Watch", page: "watch" },
     { icon: Cpu, label: "Digital Twins", page: "twins" },
     { icon: Wifi, label: "IoT Monitoring", page: "iot" },
-    { icon: Map, label: "GIS Maps", page: "gis" },
-    { icon: Database, label: "Open Datasets", page: "datasets" },
+    { icon: Map, label: "GIS Maps (planned)", page: "gis" },
+    { icon: Database, label: "Dataset curation (planned)", page: "datasets" },
     { icon: Globe, label: "Events", page: "events" },
     { icon: Newspaper, label: "News", page: "news" },
     { icon: Bot, label: "AI Agents", page: "agents" },
@@ -529,7 +555,7 @@ function HomePage({ setPage }: { setPage: (p: Page) => void }) {
     "Advancing Science Through AI",
     "Pioneering Digital Twin Research",
     "Environmental Intelligence Platform",
-    "World-Class Research Ecosystem",
+    "Connected Laboratory Workflows",
   ]);
   const { data: projets } = useProjets();
   const { data: hpResearchers } = useResearchers();
@@ -570,7 +596,7 @@ function HomePage({ setPage }: { setPage: (p: Page) => void }) {
             <span className={`inline-block w-0.5 h-12 bg-accent ml-1 align-middle transition-opacity ${cursor ? "opacity-100" : "opacity-0"}`} />
           </h1>
           <p className="text-lg text-white/70 max-w-2xl mt-4 mb-8 leading-relaxed">
-            An integrated research ecosystem combining AI agents, digital twins, IoT monitoring, and GIS intelligence to accelerate environmental science and sustainable development.
+            A laboratory workspace for scientific monitoring, project operations and reviewed parcel-water decision support.
           </p>
 
           <div className="flex flex-wrap gap-3">
@@ -624,15 +650,15 @@ function HomePage({ setPage }: { setPage: (p: Page) => void }) {
       {/* Features */}
       <section className="px-10 py-12">
         <h2 className="text-2xl font-bold text-foreground font-jakarta mb-2">Platform Capabilities</h2>
-        <p className="text-muted-foreground mb-8">A complete scientific research ecosystem — from raw sensor data to AI-powered insights.</p>
+        <p className="text-muted-foreground mb-8">Implemented workflows and planned extensions for laboratory research.</p>
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
           {[
-            { icon: Bot, title: "AI Agent Orchestra", desc: "8 specialized AI agents working in concert — from bibliometrics to simulation and quality control.", page: "agents" as Page, color: "from-primary/10 to-emerald-50" },
-            { icon: Cpu, title: "Digital Twins", desc: "High-fidelity digital replicas of environmental systems with real-time synchronization.", page: "twins" as Page, color: "from-blue-50 to-indigo-50" },
-            { icon: Wifi, title: "IoT Monitoring Grid", desc: `${hpParcels?.length ?? 0} monitored parcels streaming soil-moisture, rainfall and evapotranspiration readings.`, page: "iot" as Page, color: "from-amber-50 to-orange-50" },
-            { icon: Map, title: "GIS Intelligence", desc: "Spatial analytics and interactive mapping for geographic pattern discovery.", page: "gis" as Page, color: "from-teal-50 to-cyan-50" },
+            { icon: Bot, title: "AI Agent Workspace", desc: "Six coordinated workflow modules and two on-demand scientific analysis modules, with human review before field decisions.", page: "agents" as Page, color: "from-primary/10 to-emerald-50" },
+            { icon: Cpu, title: "Digital Twins", desc: "Parcel-level water-balance decision support using verified readings and weather forecasts.", page: "twins" as Page, color: "from-blue-50 to-indigo-50" },
+            { icon: Wifi, title: "IoT Monitoring", desc: `${hpParcels?.length ?? 0} monitored parcels with recorded soil-moisture, rainfall and evapotranspiration readings.`, page: "iot" as Page, color: "from-amber-50 to-orange-50" },
+            { icon: Map, title: "GIS Workspace", desc: "Planned mapping workspace; parcel coordinates already support local weather forecasts.", page: "gis" as Page, color: "from-teal-50 to-cyan-50" },
             { icon: BookOpen, title: "Publication Hub", desc: `${hpArticles?.length ?? 0} collected publications with bibliometric analytics and citation tracking.`, page: "publications" as Page, color: "from-purple-50 to-pink-50" },
-            { icon: Database, title: "Open Data Portal", desc: "Curated datasets with API access, notebook previews, and geospatial downloads.", page: "datasets" as Page, color: "from-rose-50 to-red-50" },
+            { icon: Database, title: "Open Data Catalogue", desc: "Approved dataset metadata with versions, licences, citations and optional access links.", page: "datasets" as Page, color: "from-rose-50 to-red-50" },
           ].map(f => (
             <button
               key={f.title}
@@ -695,7 +721,7 @@ function HomePage({ setPage }: { setPage: (p: Page) => void }) {
           ))}
         </div>
         <div className="border-t border-white/10 pt-6 flex items-center justify-between text-xs">
-          <span>© 2024 LabAI Research Institute — All rights reserved</span>
+          <span>LRSTE · Internship prototype</span>
           <span>Built with AI · Open Science · Environmental Excellence</span>
         </div>
       </footer>
@@ -710,6 +736,7 @@ function DashboardPage({ onNavigate }: { onNavigate: (page: Page) => void }) {
   const { data: dbResearchers } = useResearchers();
   const { data: articles } = useArticles();
   const { data: parcels } = useParcels();
+  const { data: sources } = useSources();
   const { data: historique } = useHistorique();
   const { data: alertes } = useAlertes();
   const resolveAlerte = useResolveAlerte();
@@ -723,14 +750,21 @@ function DashboardPage({ onNavigate }: { onNavigate: (page: Page) => void }) {
   const articleCount = articles?.length ?? 0;
   const parcelCount = parcels?.length ?? 0;
   const alertCount = alertes?.length ?? 0;
+  const onboarding = [
+    { label: "Create the first research project", detail: "Track milestones, risks, equipment and budget work.", page: "projects" as Page, done: projectCount > 0 },
+    { label: "Add a researcher profile", detail: "Create the authoritative profile before synchronising metrics.", page: "researchers" as Page, done: researcherCount > 0 },
+    { label: "Configure a Scientific Watch source", detail: "Add a lab-approved RSS or scientific source before collection.", page: "watch" as Page, done: (sources?.length ?? 0) > 0 },
+    { label: "Set up a field parcel", detail: "Add parcel and soil parameters before collecting field readings.", page: "iot" as Page, done: parcelCount > 0 },
+  ];
+  const showOnboarding = [projets, dbResearchers, parcels, sources].every(data => data !== undefined) && onboarding.some(step => !step.done);
 
   const kpis = [
-    { label: "Active Projects", value: activeProjects, change: 0, icon: FolderKanban, color: "primary" as const, trend: [] as number[] },
-    { label: "Researchers", value: researcherCount, change: 0, icon: Users, color: "emerald" as const, trend: [] as number[] },
-    { label: "Articles Collected", value: articleCount, change: 0, icon: BookOpen, color: "blue" as const, trend: [] as number[] },
-    { label: "Digital Twin Parcels", value: parcelCount, change: 0, icon: Cpu, color: "amber" as const, trend: [] as number[] },
-    { label: "Active Alerts", value: alertCount, change: 0, icon: Bell, color: "purple" as const, trend: [] as number[] },
-    { label: "Total Projects", value: projectCount, change: 0, icon: Database, color: "primary" as const, trend: [] as number[] },
+    { label: "Active Projects", value: activeProjects, icon: FolderKanban, color: "primary" as const, trend: [] as number[] },
+    { label: "Researchers", value: researcherCount, icon: Users, color: "emerald" as const, trend: [] as number[] },
+    { label: "Articles Collected", value: articleCount, icon: BookOpen, color: "blue" as const, trend: [] as number[] },
+    { label: "Digital Twin Parcels", value: parcelCount, icon: Cpu, color: "amber" as const, trend: [] as number[] },
+    { label: "Active Alerts", value: alertCount, icon: Bell, color: "purple" as const, trend: [] as number[] },
+    { label: "Total Projects", value: projectCount, icon: Database, color: "primary" as const, trend: [] as number[] },
   ];
 
   // The orchestrator appends to its history in arrival order, so the newest
@@ -740,6 +774,7 @@ function DashboardPage({ onNavigate }: { onNavigate: (page: Page) => void }) {
   return (
     <div className="p-6 space-y-6 overflow-y-auto h-full scrollbar-hide">
       {/* KPIs */}
+      <ResearchAttention openProjects={()=>onNavigate("projects")}/>
       <div>
         <div className="flex items-center justify-between mb-4">
           <h2 className="text-xl font-bold text-foreground font-jakarta">Platform Overview</h2>
@@ -771,6 +806,31 @@ function DashboardPage({ onNavigate }: { onNavigate: (page: Page) => void }) {
         />
         <FormError error={resolveAlerte.error} />
       </Modal>
+
+      {showOnboarding && (
+        <section className="bg-card border border-primary/20 rounded-2xl overflow-hidden">
+          <div className="p-5 border-b border-border bg-primary/5">
+            <h3 className="font-bold text-foreground font-jakarta">Start using the platform</h3>
+            <p className="text-xs text-muted-foreground mt-1">Complete the parts that apply to the laboratory now. This checklist records no sample data and does not imply that empty modules are failing.</p>
+          </div>
+          <div className="grid sm:grid-cols-2 xl:grid-cols-4 divide-y sm:divide-y-0 sm:divide-x divide-border">
+            {onboarding.map(step => (
+              <div key={step.label} className="p-4 flex gap-3">
+                <div className={`mt-0.5 shrink-0 w-6 h-6 rounded-lg flex items-center justify-center ${step.done ? "bg-emerald-100 text-emerald-700" : "bg-muted text-muted-foreground"}`}>
+                  <CheckCircle2 size={14} />
+                </div>
+                <div className="min-w-0">
+                  <p className={`text-xs font-semibold ${step.done ? "text-foreground" : "text-muted-foreground"}`}>{step.label}</p>
+                  <p className="mt-1 text-[10px] leading-relaxed text-muted-foreground">{step.done ? "Configured" : step.detail}</p>
+                  {!step.done && <button onClick={() => onNavigate(step.page)} className="mt-2 text-[10px] font-bold text-primary hover:underline">Open module →</button>}
+                </div>
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
+
+      <UnifiedActivityTimeline onNavigate={onNavigate} />
 
       {/* Bottom row */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
@@ -873,28 +933,157 @@ function DashboardPage({ onNavigate }: { onNavigate: (page: Page) => void }) {
   );
 }
 
+// ─── UNIFIED LABORATORY ACTIVITY TIMELINE ───────────────────────────────────
+// This is a read-only view over existing persisted records. It deliberately
+// does not manufacture a universal audit table: each item still points to the
+// module that owns the underlying action and its approval history.
+type TimelineCategory = "all" | "agent" | "watch" | "field" | "review" | "planning" | "alert";
+type TimelineItem = {
+  id: string;
+  category: Exclude<TimelineCategory, "all">;
+  timestamp: string;
+  title: string;
+  detail: string;
+  page: Page;
+  status?: string;
+};
+
+function timelineTime(value: string) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "unknown time";
+  const diffMinutes = Math.floor((Date.now() - date.getTime()) / 60_000);
+  if (diffMinutes < 1) return "just now";
+  if (diffMinutes < 60) return `${diffMinutes}m ago`;
+  if (diffMinutes < 1_440) return `${Math.floor(diffMinutes / 60)}h ago`;
+  if (diffMinutes < 10_080) return `${Math.floor(diffMinutes / 1_440)}d ago`;
+  return date.toLocaleDateString();
+}
+
+function UnifiedActivityTimeline({ onNavigate }: { onNavigate: (page: Page) => void }) {
+  const [filter, setFilter] = useState<TimelineCategory>("all");
+  const { data: events } = useHistorique();
+  const { data: collectionRuns } = useCollectionRuns();
+  const { data: reviews } = useMeasurementReviews("all");
+  const { data: fieldTasks } = useFieldTasks("all");
+  const { data: planningTasks } = usePlanningTasks();
+  const { data: alerts } = useAlertes();
+  const loading = [events, collectionRuns, reviews, fieldTasks, planningTasks, alerts].some(data => data === undefined);
+
+  const eventPage = (agent: string): Page => ({
+    veille: "watch", bibliometrie: "researchers", digital_twin: "iot",
+    field_operations: "iot", mis: "projects", qualite: "admin", orchestrateur: "agents",
+  } as Record<string, Page>)[agent] ?? "agents";
+
+  const items: TimelineItem[] = [
+    ...(events ?? []).map(event => ({
+      id: `event-${event.id}`, category: "agent" as const, timestamp: event.timestamp,
+      title: event.type_evenement.replace(/_/g, " "),
+      detail: `Routed by ${event.source_agent}${event.traite ? " · processed" : " · awaiting processing"}`,
+      page: eventPage(event.source_agent), status: event.traite ? "processed" : "pending",
+    })),
+    ...(collectionRuns ?? []).map(run => ({
+      id: `watch-${run.id}`, category: "watch" as const, timestamp: run.completed_at ?? run.started_at,
+      title: `Scientific Watch collection ${run.status.replace(/_/g, " ")}`,
+      detail: `${run.articles_collected} article${run.articles_collected === 1 ? "" : "s"} collected from ${run.source_count} source${run.source_count === 1 ? "" : "s"}`,
+      page: "watch" as Page, status: run.status,
+    })),
+    ...(reviews ?? []).map(review => ({
+      id: `review-${review.id}`, category: "review" as const, timestamp: review.reviewed_at ?? review.created_at,
+      title: `Measurement review ${review.status}`,
+      detail: `Parcel ${review.parcel_id} · reading ${review.reading_id}${review.issues.length ? ` · ${review.issues.join(", ")}` : ""}`,
+      page: "iot" as Page, status: review.status,
+    })),
+    ...(fieldTasks ?? []).map(task => ({
+      id: `field-task-${task.id}`, category: "field" as const, timestamp: task.completed_at ?? task.created_at,
+      title: task.status === "completed" ? "Irrigation field task completed" : "Irrigation field task scheduled",
+      detail: `Parcel ${task.parcel_id} · ${task.planned_amount_mm} mm planned for ${task.scheduled_date}${task.actual_amount_mm != null ? ` · ${task.actual_amount_mm} mm recorded` : ""}`,
+      page: "iot" as Page, status: task.status,
+    })),
+    ...(planningTasks ?? []).map(task => ({
+      id: `planning-${task.id}`, category: "planning" as const, timestamp: task.updated_at ?? task.created_at,
+      title: task.title,
+      detail: `Planning task · ${task.status}${task.due_date ? ` · due ${task.due_date}` : ""}`,
+      page: "agents" as Page, status: task.status,
+    })),
+    ...(alerts ?? []).map(alert => ({
+      id: `alert-${alert.id}`, category: "alert" as const, timestamp: alert.timestamp,
+      title: alert.message,
+      detail: `Active ${alert.niveau} alert from ${alert.source_evenement}`,
+      page: "dashboard" as Page, status: alert.niveau,
+    })),
+  ].sort((left, right) => new Date(right.timestamp).getTime() - new Date(left.timestamp).getTime());
+
+  const visibleItems = items.filter(item => filter === "all" || item.category === filter).slice(0, 25);
+  const categoryStyle: Record<Exclude<TimelineCategory, "all">, { label: string; className: string }> = {
+    agent: { label: "Agent", className: "bg-violet-100 text-violet-700" },
+    watch: { label: "Watch", className: "bg-blue-100 text-blue-700" },
+    field: { label: "Field", className: "bg-emerald-100 text-emerald-700" },
+    review: { label: "Review", className: "bg-amber-100 text-amber-800" },
+    planning: { label: "Planning", className: "bg-sky-100 text-sky-700" },
+    alert: { label: "Alert", className: "bg-red-100 text-red-700" },
+  };
+
+  return (
+    <section className="bg-card border border-border rounded-2xl overflow-hidden">
+      <div className="p-5 border-b border-border flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h3 className="font-bold text-foreground font-jakarta">Laboratory activity timeline</h3>
+          <p className="text-xs text-muted-foreground mt-1">Persisted work across agents, literature collection, field review, tasks and active alerts.</p>
+        </div>
+        <select value={filter} onChange={event => setFilter(event.target.value as TimelineCategory)} className="px-3 py-2 bg-muted border border-border rounded-xl text-xs">
+          <option value="all">All activity</option>
+          <option value="agent">Agent events</option>
+          <option value="watch">Scientific Watch</option>
+          <option value="field">Field tasks</option>
+          <option value="review">Measurement reviews</option>
+          <option value="planning">Planning</option>
+          <option value="alert">Active alerts</option>
+        </select>
+      </div>
+      <div className="divide-y divide-border max-h-[30rem] overflow-y-auto scrollbar-hide">
+        {loading && <div className="px-5 py-8 text-sm text-muted-foreground">Loading recorded activity…</div>}
+        {!loading && visibleItems.length === 0 && (
+          <div className="px-5 py-8 text-sm text-muted-foreground">No recorded activity for this filter yet. When the lab works in a module, its persisted record will appear here.</div>
+        )}
+        {visibleItems.map(item => {
+          const style = categoryStyle[item.category];
+          return (
+            <button key={item.id} onClick={() => onNavigate(item.page)} className="w-full text-left px-5 py-3.5 flex gap-3 hover:bg-muted/50 transition-colors">
+              <div className={`mt-0.5 px-2 py-1 h-fit rounded-full text-[9px] font-bold uppercase tracking-wide ${style.className}`}>{style.label}</div>
+              <div className="min-w-0 flex-1">
+                <div className="flex justify-between gap-3"><p className="text-xs font-semibold text-foreground truncate">{item.title}</p><span className="shrink-0 text-[10px] text-muted-foreground">{timelineTime(item.timestamp)}</span></div>
+                <p className="mt-1 text-[11px] text-muted-foreground line-clamp-2">{item.detail}</p>
+              </div>
+            </button>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
 // ─── PROJECTS PAGE ──────────────────────────────────────────────────────────
 
 // POST /api/mis/projets/ takes a ProjetSchema (agents/mis/schemas.py). `id` is
 // server-generated (uuid4 default) so the form omits it. `statut` is a Literal —
 // only the four values below are accepted, anything else is a 422.
-function NewProjectForm({ onDone }: { onDone: () => void }) {
+function NewProjectForm({ onDone, project }: { onDone: () => void; project?: Projet }) {
   const create = useCreateProjet();
-  const [nom, setNom] = useState("");
-  const [description, setDescription] = useState("");
-  const [statut, setStatut] = useState<Projet["statut"]>("planifie");
-  const [dateDebut, setDateDebut] = useState(new Date().toISOString().slice(0, 10));
-  const [dateFin, setDateFin] = useState("");
-  const [budget, setBudget] = useState("0");
-  const [responsable, setResponsable] = useState("");
+  const update = useUpdateProjet();
+  const [nom, setNom] = useState(project?.nom ?? "");
+  const [description, setDescription] = useState(project?.description ?? "");
+  const [statut, setStatut] = useState<Projet["statut"]>(project?.statut ?? "planifie");
+  const [dateDebut, setDateDebut] = useState(project?.date_debut ?? new Date().toISOString().slice(0, 10));
+  const [dateFin, setDateFin] = useState(project?.date_fin_prevue ?? "");
+  const [budget, setBudget] = useState(String(project?.budget_alloue ?? 0));
+  const [responsable, setResponsable] = useState(project?.responsable ?? "");
 
   return (
     <form
       className="space-y-4"
       onSubmit={e => {
         e.preventDefault();
-        create.mutate(
-          {
+        const data = {
             nom: nom.trim(),
             description: description.trim() || null,
             statut,
@@ -902,9 +1091,9 @@ function NewProjectForm({ onDone }: { onDone: () => void }) {
             date_fin_prevue: dateFin || null,
             budget_alloue: Number(budget) || 0,
             responsable: responsable.trim(),
-          },
-          { onSuccess: onDone },
-        );
+          };
+        if (project) update.mutate({ id: project.id, data }, { onSuccess: onDone });
+        else create.mutate(data, { onSuccess: onDone });
       }}
     >
       <Field label="Project name" required>
@@ -929,31 +1118,209 @@ function NewProjectForm({ onDone }: { onDone: () => void }) {
           <input type="date" className={inputCls} value={dateDebut} onChange={e => setDateDebut(e.target.value)} required />
         </Field>
         <Field label="Planned end">
-          <input type="date" className={inputCls} value={dateFin} onChange={e => setDateFin(e.target.value)} />
+          <input type="date" min={dateDebut} className={inputCls} value={dateFin} onChange={e => setDateFin(e.target.value)} />
         </Field>
       </div>
       <Field label="Allocated budget">
         <input type="number" min="0" step="any" className={inputCls} value={budget} onChange={e => setBudget(e.target.value)} />
       </Field>
-      <FormError error={create.error} />
+      <FormError error={update.error ?? create.error} />
       <div className="flex justify-end gap-2 pt-1">
         <button type="button" onClick={onDone} className="px-4 py-2 text-sm font-medium rounded-xl text-muted-foreground hover:bg-secondary hover:text-foreground transition-all duration-200">
           Cancel
         </button>
-        <SubmitButton pending={create.isPending} label="Create project" />
+        <SubmitButton pending={create.isPending || update.isPending} label={project ? "Save changes" : "Create project"} />
       </div>
     </form>
   );
 }
 
+/**
+ * The MIS is deliberately a small operational workbench, not a second opaque
+ * planner. Every warning is derived from persisted records, and every action
+ * here is attributed to a project before it is sent to the agent event stream.
+ */
+function ProjectOperationsPanel({ projects }: { projects: Projet[] }) {
+  const { canWrite, canReview } = useLabPermissions();
+  const [projectId, setProjectId] = useState(projects[0]?.id ?? "");
+  const [milestoneTitle, setMilestoneTitle] = useState("");
+  const [milestoneDate, setMilestoneDate] = useState("");
+  const [deliverableTitle, setDeliverableTitle] = useState("");
+  const [deliverableDate, setDeliverableDate] = useState("");
+  const [riskTitle, setRiskTitle] = useState("");
+  const [riskLikelihood, setRiskLikelihood] = useState("3");
+  const [riskImpact, setRiskImpact] = useState("3");
+  const [entryKind, setEntryKind] = useState<"commitment" | "expense">("expense");
+  const [entryAmount, setEntryAmount] = useState("");
+  const [entryDescription, setEntryDescription] = useState("");
+  const [equipmentId, setEquipmentId] = useState("");
+  const [reservationPurpose, setReservationPurpose] = useState("");
+  const [reservationStart, setReservationStart] = useState("");
+  const [reservationEnd, setReservationEnd] = useState("");
+  const [maintenanceDate, setMaintenanceDate] = useState("");
+  const [setup, setSetup] = useState<"budget" | "equipment" | "staff" | null>(null);
+
+  useEffect(() => {
+    if (!projects.some(project => project.id === projectId)) setProjectId(projects[0]?.id ?? "");
+  }, [projectId, projects]);
+
+  const { data: budgets } = useBudgets();
+  const { data: equipment } = useEquipements();
+  const projectBudgets = (budgets ?? []).filter(budget => budget.projet_id === projectId);
+  const [selectedBudgetId, setSelectedBudgetId] = useState("");
+  const budgetId = projectBudgets.find(item => item.id === selectedBudgetId)?.id ?? projectBudgets[0]?.id;
+  const { data: milestones } = useProjectMilestones(projectId);
+  const { data: deliverables } = useProjectDeliverables(projectId);
+  const { data: risks } = useProjectRisks(projectId);
+  const { data: summary } = useBudgetSummary(budgetId);
+  const { data: alerts } = useOperationalAlerts();
+  const { data: report } = useMonthlyProjectReport(projectId);
+  const { data: reservations } = useReservations();
+  const { data: maintenance } = useMaintenance();
+  const { data: workload } = useWorkload();
+  const createMilestone = useCreateMilestone(projectId);
+  const updateMilestone = useUpdateMilestone(projectId);
+  const createDeliverable = useCreateDeliverable(projectId);
+  const createRisk = useCreateRisk(projectId);
+  const createEntry = useCreateBudgetEntry(projectId);
+  const createReservation = useCreateReservation(projectId);
+  const approveReservation = useApproveReservation(projectId);
+  const createMaintenance = useCreateMaintenance(projectId);
+  const projectAlerts = (alerts ?? []).filter(alert => alert.project_id === projectId);
+  const projectReservations = (reservations ?? []).filter(item => item.project_id === projectId);
+
+  useEffect(() => {
+    if (!equipmentId && equipment?.[0]) setEquipmentId(equipment[0].id);
+  }, [equipment, equipmentId]);
+
+  if (!projectId) return null;
+  const today = new Date().toISOString().slice(0, 10);
+  return (
+    <section className="bg-card border border-border rounded-2xl overflow-hidden">
+      <div className="p-5 border-b border-border flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h3 className="font-bold text-foreground font-jakarta">Laboratory operations</h3>
+          <div className="flex gap-3 mt-2 text-xs font-semibold text-primary">
+            <button disabled={!canWrite} onClick={() => setSetup("budget")}>Add budget</button>
+            <button disabled={!canWrite} onClick={() => setSetup("equipment")}>Add equipment</button>
+            <button disabled={!canWrite} onClick={() => setSetup("staff")}>Add staff</button>
+          </div>
+          <Modal open={setup !== null} onClose={() => setSetup(null)} title={`Add ${setup ?? "resource"}`}>
+            {setup === "budget" && <NewBudgetForm initialProjectId={projectId} onDone={() => setSetup(null)} />}
+            {setup === "equipment" && <NewEquipementForm onDone={() => setSetup(null)} />}
+            {setup === "staff" && <NewPersonnelForm projectId={projectId} onDone={() => setSetup(null)} />}
+          </Modal>
+          <p className="text-xs text-muted-foreground mt-0.5">Track milestones, outputs, risks, equipment and budget activity for each project.</p>
+        </div>
+        <select aria-label="Project for laboratory operations" className="min-w-56 px-3 py-2 text-sm bg-muted border border-border rounded-xl" value={projectId} onChange={event => setProjectId(event.target.value)}>
+          {projects.map(project => <option key={project.id} value={project.id}>{project.nom}</option>)}
+        </select>
+      </div>
+
+      <ProjectSetup key={projectId} projectId={projectId} onBudget={() => setSetup("budget")} onStaff={() => setSetup("staff")} />
+      {projectAlerts.length > 0 && (
+        <div className="p-4 border-b border-border bg-amber-50/50 space-y-2">
+          {projectAlerts.slice(0, 3).map(alert => (
+            <div key={`${alert.category}-${alert.entity_id}`} className={`text-xs rounded-xl px-3 py-2 border ${alert.level === "critical" ? "bg-red-50 border-red-200 text-red-800" : "bg-amber-50 border-amber-200 text-amber-800"}`}>
+              <span className="font-bold uppercase tracking-wide mr-2">{alert.category}</span>{alert.message}
+            </div>
+          ))}
+        </div>
+      )}
+
+      <div className="px-5"><FormError error={createMilestone.error ?? updateMilestone.error ?? createDeliverable.error ?? createRisk.error ?? createEntry.error ?? createReservation.error ?? approveReservation.error ?? createMaintenance.error} /></div>
+      <div className="grid lg:grid-cols-2 gap-px bg-border">
+        <div className="bg-card p-5 space-y-4">
+          <div className="flex items-center justify-between"><h4 className="text-sm font-bold">Milestones</h4><span className="text-xs text-muted-foreground">{milestones?.filter(item => item.status === "completed").length ?? 0}/{milestones?.length ?? 0} complete</span></div>
+          <form className="flex gap-2" onSubmit={event => { event.preventDefault(); if (milestoneTitle && milestoneDate) createMilestone.mutate({ title: milestoneTitle, due_date: milestoneDate }, { onSuccess: () => { setMilestoneTitle(""); setMilestoneDate(""); } }); }}>
+            <input className={`${inputCls} min-w-0`} placeholder="New milestone" value={milestoneTitle} onChange={event => setMilestoneTitle(event.target.value)} />
+            <input type="date" className={`${inputCls} w-36`} value={milestoneDate} onChange={event => setMilestoneDate(event.target.value)} />
+            <button disabled={!canWrite} className="px-3 rounded-xl bg-primary text-primary-foreground" title="Add milestone"><Plus size={15} /></button>
+          </form>
+          <div className="space-y-2">
+            {(milestones ?? []).map(item => <div key={item.id} className="flex items-center justify-between gap-3 text-xs border border-border rounded-xl px-3 py-2">
+              <span className={item.status === "completed" ? "line-through text-muted-foreground" : "text-foreground"}>{item.title} <span className="text-muted-foreground">· {item.due_date}</span></span>
+              {item.status !== "completed" && <button disabled={!canWrite} onClick={() => updateMilestone.mutate({ id: item.id, status: "completed" })} className="text-primary font-semibold">Complete</button>}
+            </div>)}
+            {!milestones?.length && <p className="text-xs text-muted-foreground">No milestones yet.</p>}
+          </div>
+        </div>
+
+        <div className="bg-card p-5 space-y-4">
+          <div className="flex items-center justify-between"><h4 className="text-sm font-bold">Deliverables</h4><span className="text-xs text-muted-foreground">{deliverables?.length ?? 0} tracked</span></div>
+          <form className="flex gap-2" onSubmit={event => { event.preventDefault(); if (deliverableTitle) createDeliverable.mutate({ title: deliverableTitle, due_date: deliverableDate || undefined }, { onSuccess: () => setDeliverableTitle("") }); }}>
+            <input className={inputCls} placeholder="Report, dataset, protocol…" value={deliverableTitle} onChange={event => setDeliverableTitle(event.target.value)} />
+            <input aria-label="Deliverable due date" type="date" className={`${inputCls} w-36`} value={deliverableDate} onChange={event => setDeliverableDate(event.target.value)} />
+            <button disabled={!canWrite} className="px-3 rounded-xl bg-primary text-primary-foreground" title="Add deliverable"><Plus size={15} /></button>
+          </form>
+          <div className="space-y-2">
+            {(deliverables ?? []).map(item => <div key={item.id} className="text-xs border border-border rounded-xl px-3 py-2"><span className="font-medium">{item.title}</span><span className="text-muted-foreground"> · {item.deliverable_type} · {item.status}</span></div>)}
+            {!deliverables?.length && <p className="text-xs text-muted-foreground">No deliverables yet.</p>}
+          </div>
+        </div>
+
+        <div className="bg-card p-5 space-y-4">
+          <div className="flex items-center justify-between"><h4 className="text-sm font-bold">Risk register</h4><span className="text-xs text-muted-foreground">{risks?.filter(item => item.status === "open").length ?? 0} open</span></div>
+          <form className="grid grid-cols-[1fr_4rem_4rem_auto] gap-2" onSubmit={event => { event.preventDefault(); if (riskTitle) createRisk.mutate({ title: riskTitle, likelihood: Number(riskLikelihood), impact: Number(riskImpact) }, { onSuccess: () => setRiskTitle("") }); }}>
+            <input className={inputCls} placeholder="Risk to manage" value={riskTitle} onChange={event => setRiskTitle(event.target.value)} />
+            <input aria-label="Likelihood" type="number" min="1" max="5" className={inputCls} value={riskLikelihood} onChange={event => setRiskLikelihood(event.target.value)} />
+            <input aria-label="Impact" type="number" min="1" max="5" className={inputCls} value={riskImpact} onChange={event => setRiskImpact(event.target.value)} />
+            <button disabled={!canWrite} className="px-3 rounded-xl bg-primary text-primary-foreground" title="Add risk"><Plus size={15} /></button>
+          </form>
+          <div className="space-y-2">{(risks ?? []).map(item => <div key={item.id} className="text-xs border border-border rounded-xl px-3 py-2"><span className="font-medium">{item.title}</span><span className="text-muted-foreground"> · score {item.likelihood * item.impact}/25 · {item.status}</span></div>)}</div>
+        </div>
+
+        <div className="bg-card p-5 space-y-4">
+          <div className="flex items-center justify-between"><h4 className="text-sm font-bold">Budget and monthly report</h4><span className="text-xs text-muted-foreground">{summary ? `${summary.available_after_commitments.toLocaleString()} ${summary.currency} available` : "No budget linked"}</span></div>
+          {projectBudgets.length > 1 && <select aria-label="Project budget" className={inputCls} value={budgetId} onChange={event => setSelectedBudgetId(event.target.value)}>{projectBudgets.map(item => <option key={item.id} value={item.id}>{item.description || item.id} · {item.devise}</option>)}</select>}
+          {summary && <div className="grid grid-cols-3 gap-2 text-xs"><Stat label="Allocated" value={`${summary.allocated}`} /><Stat label="Spent" value={`${summary.spent}`} /><Stat label="Committed" value={`${summary.committed}`} /></div>}
+          {budgetId && summary && <BudgetLedger budgetId={budgetId} spent={summary.spent} />}
+          {budgetId && <form className="grid grid-cols-[7rem_1fr_5rem_auto] gap-2" onSubmit={event => { event.preventDefault(); if (entryDescription && Number(entryAmount) > 0) createEntry.mutate({ budget_id: budgetId, entry_type: entryKind, category: "operations", description: entryDescription, amount: Number(entryAmount), occurred_at: today }, { onSuccess: () => { setEntryAmount(""); setEntryDescription(""); } }); }}>
+            <select className={inputCls} value={entryKind} onChange={event => setEntryKind(event.target.value as "commitment" | "expense")}><option value="expense">Expense</option><option value="commitment">Commitment</option></select>
+            <input required minLength={3} maxLength={500} aria-label="Budget entry description" className={inputCls} placeholder="Description" value={entryDescription} onChange={event => setEntryDescription(event.target.value)} />
+            <input required aria-label="Budget entry amount" type="number" min="0.01" step="0.01" className={inputCls} placeholder="Amount" value={entryAmount} onChange={event => setEntryAmount(event.target.value)} />
+            <button disabled={!canWrite||createEntry.isPending} className="px-3 rounded-xl bg-primary text-primary-foreground" title="Record budget entry"><Plus size={15} /></button>
+          </form>}
+          {report && <p className="text-xs text-muted-foreground">{report.month}: {report.milestones_completed}/{report.milestone_total} milestones completed, {report.open_risk_count} open risks, {report.planned_task_hours} planned hours. {report.highlights[0]}</p>}
+        </div>
+
+        <div className="bg-card p-5 space-y-4">
+          <div className="flex items-center justify-between"><h4 className="text-sm font-bold">Shared equipment</h4><span className="text-xs text-muted-foreground">Approval prevents double-booking</span></div>
+          <form className="grid grid-cols-2 gap-2" onSubmit={event => { event.preventDefault(); if (equipmentId && reservationPurpose && reservationStart && reservationEnd) createReservation.mutate({ equipment_id: equipmentId, project_id: projectId, purpose: reservationPurpose, start_at: new Date(reservationStart).toISOString(), end_at: new Date(reservationEnd).toISOString() }, { onSuccess: () => { setReservationPurpose(""); setReservationStart(""); setReservationEnd(""); } }); }}>
+            <select className={inputCls} value={equipmentId} onChange={event => setEquipmentId(event.target.value)} required><option value="">Select equipment</option>{(equipment ?? []).filter(item => item.etat === "operationnel").map(item => <option key={item.id} value={item.id}>{item.nom}</option>)}</select>
+            <input className={inputCls} placeholder="Purpose" value={reservationPurpose} onChange={event => setReservationPurpose(event.target.value)} />
+            <input type="datetime-local" className={inputCls} value={reservationStart} onChange={event => setReservationStart(event.target.value)} />
+            <div className="flex gap-2"><input type="datetime-local" className={inputCls} value={reservationEnd} onChange={event => setReservationEnd(event.target.value)} /><button disabled={!canWrite} className="px-3 rounded-xl bg-primary text-primary-foreground" title="Request reservation"><Plus size={15} /></button></div>
+          </form>
+          <div className="space-y-2">{projectReservations.slice(0, 3).map(item => <div key={item.id} className="flex items-center justify-between gap-2 text-xs border border-border rounded-xl px-3 py-2"><span>{item.purpose} · {item.status}</span>{item.status === "requested" && <button disabled={!canReview} className="text-primary font-semibold" onClick={() => approveReservation.mutate(item.id)}>Approve</button>}</div>)}{!projectReservations.length && <p className="text-xs text-muted-foreground">No reservations for this project.</p>}</div>
+        </div>
+
+        <div className="bg-card p-5 space-y-4">
+          <div className="flex items-center justify-between"><h4 className="text-sm font-bold">Maintenance and workload</h4><span className="text-xs text-muted-foreground">Preventive work stays visible</span></div>
+          <form className="flex gap-2" onSubmit={event => { event.preventDefault(); if (equipmentId && maintenanceDate) createMaintenance.mutate({ equipment_id: equipmentId, maintenance_type: "calibration", due_date: maintenanceDate }, { onSuccess: () => setMaintenanceDate("") }); }}>
+            <input type="date" className={inputCls} value={maintenanceDate} onChange={event => setMaintenanceDate(event.target.value)} />
+            <button disabled={!canWrite} className="px-3 rounded-xl bg-primary text-primary-foreground" title="Schedule calibration"><Plus size={15} /></button>
+          </form>
+          <div className="space-y-2">{(maintenance ?? []).slice(0, 2).map(item => <div key={item.id} className="text-xs border border-border rounded-xl px-3 py-2">{item.maintenance_type} · due {item.due_date} · {item.status}</div>)}</div>
+          <div className="space-y-2 pt-1">{(workload ?? []).filter(item => item.overloaded).slice(0, 2).map(item => <div key={item.personnel_id} className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-xl px-3 py-2">{item.personnel_name}: {item.scheduled_hours}h planned / {item.capacity_hours}h capacity</div>)}{!(workload ?? []).some(item => item.overloaded) && <p className="text-xs text-muted-foreground">No current workload overloads detected.</p>}</div>
+        </div>
+      </div>
+      <ProjectCompletion key={projectId} projectId={projectId} />
+      <ProjectDossier key={`dossier-${projectId}`} projectId={projectId} />
+    </section>
+  );
+}
+
 function ProjectsPage() {
+  const { canWrite } = useLabPermissions();
   const [view, setView] = useState<"kanban" | "timeline">("kanban");
   const [creating, setCreating] = useState(false);
+  const [editing, setEditing] = useState<Projet | null>(null);
   const [projectToDelete, setProjectToDelete] = useState<Projet | null>(null);
   const { data: projets, isLoading, error } = useProjets();
   const deleteProjet = useDeleteProjet();
 
-  const statusCols = ["planifie", "en_cours", "termine"] as const;
+  const statusCols = ["planifie", "en_cours", "termine", "suspendu"] as const;
   const statusLabels: Record<string, string> = { planifie: "Planning", en_cours: "Active", termine: "Completed", suspendu: "Suspended" };
   const statusColors: Record<string, string> = {
     planifie: "bg-amber-100 text-amber-700 border-amber-200",
@@ -1005,7 +1372,7 @@ function ProjectsPage() {
               </button>
             ))}
           </div>
-          <button onClick={() => setCreating(true)}
+          <button disabled={!canWrite} onClick={() => setCreating(true)}
             className="flex items-center gap-2 px-3 py-2 text-xs font-semibold rounded-xl bg-primary text-primary-foreground shadow-lg shadow-primary/20 hover:opacity-90 transition-all duration-200">
             <Plus size={14} />New project
           </button>
@@ -1050,6 +1417,10 @@ function ProjectsPage() {
         </div>
       </Modal>
 
+      <Modal open={!!editing} onClose={() => setEditing(null)} title="Edit project">
+        {editing && <NewProjectForm key={editing.id} project={editing} onDone={() => setEditing(null)} />}
+      </Modal>
+
       {isLoading && (
         <div className="flex items-center justify-center py-20 text-muted-foreground text-sm">
           <RefreshCw size={16} className="animate-spin mr-2" />Loading projects…
@@ -1069,7 +1440,7 @@ function ProjectsPage() {
           <p className="text-xs text-muted-foreground mt-1 mb-4">
             The MIS agent has no projects on record. Create the first one to start tracking budget, staff and equipment against it.
           </p>
-          <button onClick={() => setCreating(true)}
+          <button disabled={!canWrite} onClick={() => setCreating(true)}
             className="inline-flex items-center gap-2 px-4 py-2 text-sm font-semibold rounded-xl bg-primary text-primary-foreground shadow-lg shadow-primary/20 hover:opacity-90 transition-all duration-200">
             <Plus size={15} />New project
           </button>
@@ -1077,7 +1448,7 @@ function ProjectsPage() {
       )}
 
       {!isLoading && !error && projets && projets.length > 0 && view === "kanban" && (
-        <div className="grid grid-cols-3 gap-5">
+        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-5">
           {statusCols.map(status => {
             const col = projets.filter(p => p.statut === status);
             return (
@@ -1103,8 +1474,11 @@ function ProjectsPage() {
                         {proj.date_fin_prevue && <div className="flex items-center gap-1"><Clock size={11} />{proj.date_fin_prevue}</div>}
                         <div className="font-semibold">{proj.budget_alloue.toLocaleString()}</div>
                       </div>
+                      <button type="button" disabled={!canWrite} onClick={() => setEditing(proj)} className="mt-3 text-xs font-semibold text-primary hover:underline">
+                        Edit project
+                      </button>
                       <button
-                        onClick={e => { e.stopPropagation(); setProjectToDelete(proj); }}
+                        disabled={!canWrite} onClick={e => { e.stopPropagation(); setProjectToDelete(proj); }}
                         className="mt-3 flex items-center gap-1 text-[10px] font-semibold text-red-600 hover:text-red-700"
                       >
                         <Trash2 size={11} /> Delete project
@@ -1137,6 +1511,7 @@ function ProjectsPage() {
                     <div className="w-56 shrink-0">
                       <p className="text-xs font-medium text-foreground truncate">{proj.nom}</p>
                       <p className="text-[10px] text-muted-foreground">{proj.date_debut}</p>
+                      <button type="button" disabled={!canWrite} onClick={() => setEditing(proj)} className="text-xs font-semibold text-primary hover:underline">Edit project</button>
                     </div>
                     <div className="flex-1 h-8 bg-muted rounded-xl relative overflow-hidden">
                       {bar ? (
@@ -1161,6 +1536,8 @@ function ProjectsPage() {
           </div>
         </div>
       )}
+
+      {!isLoading && !error && projets && projets.length > 0 && <ProjectOperationsPanel projects={projets} />}
     </div>
   );
 }
@@ -1169,7 +1546,9 @@ function ProjectsPage() {
 function PublicationsPage() {
   const [filter, setFilter] = useState("all");
   const [search, setSearch] = useState("");
-  const { data: articles, isLoading } = useArticles();
+  const [stateFilter, setStateFilter] = useState<"all" | "unread" | "read" | "saved" | "shared">("all");
+  const { data: articles, isLoading } = useArticles({ search, state: stateFilter });
+  const articleState = useUpdateArticleState();
 
   // Filter chips are the tags the veille agent actually assigned, most common
   // first. NB: `Map` resolves to the lucide-react icon here, so use a record.
@@ -1184,7 +1563,8 @@ function PublicationsPage() {
 
   const filtered = (articles ?? []).filter(a => {
     const matchesTag = filter === "all" || a.tags.some(t => t.tag.toLowerCase() === filter);
-    const matchesSearch = !search || a.title.toLowerCase().includes(search.toLowerCase());
+    const needle = search.toLowerCase();
+    const matchesSearch = !needle || [a.title, a.abstract ?? "", a.doi ?? "", ...(a.authors ?? []), ...a.tags.map(tag => tag.tag)].some(value => value.toLowerCase().includes(needle));
     return matchesTag && matchesSearch;
   });
 
@@ -1242,6 +1622,9 @@ function PublicationsPage() {
           </button>
         ))}
         <div className="ml-auto flex items-center gap-2">
+          <select value={stateFilter} onChange={event => setStateFilter(event.target.value as typeof stateFilter)} className="py-1.5 text-xs bg-muted border border-border rounded-xl px-2 focus:outline-none focus:ring-2 focus:ring-primary/30">
+            <option value="all">All states</option><option value="unread">Unread</option><option value="read">Read</option><option value="saved">Saved</option><option value="shared">Shared</option>
+          </select>
           <div className="relative">
             <Search size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground" />
             <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search publications..." className="pl-8 pr-3 py-1.5 text-xs bg-muted border border-border rounded-xl focus:outline-none focus:ring-2 focus:ring-primary/30 w-52" />
@@ -1276,7 +1659,8 @@ function PublicationsPage() {
               </div>
               <div className="flex items-center gap-3 text-muted-foreground">
                 {art.url && <a href={art.url} target="_blank" rel="noopener noreferrer" className="flex items-center gap-1 text-[10px] hover:text-primary transition-colors"><ExternalLink size={12} /> Source</a>}
-                <button className="flex items-center gap-1 text-[10px] hover:text-primary transition-colors"><Bookmark size={12} /> Save</button>
+                <button onClick={() => articleState.mutate({ articleId: art.id, mark_read: !art.state.read_at })} className="flex items-center gap-1 text-[10px] hover:text-primary transition-colors"><CheckCircle2 size={12} /> {art.state.read_at ? "Unread" : "Read"}</button>
+                <button onClick={() => articleState.mutate({ articleId: art.id, is_saved: !art.state.is_saved })} className={`flex items-center gap-1 text-[10px] transition-colors ${art.state.is_saved ? "text-primary" : "hover:text-primary"}`}><Bookmark size={12} fill={art.state.is_saved ? "currentColor" : "none"} /> {art.state.is_saved ? "Saved" : "Save"}</button>
               </div>
             </div>
           </div>
@@ -1665,6 +2049,7 @@ function ResearchersPage() {
 
   return (
     <div className="p-6 space-y-5 overflow-y-auto h-full scrollbar-hide">
+      <BibliographicTrust researchers={researchers??[]}/>
       <div className="flex items-center justify-between">
         <div>
           <h2 className="text-xl font-bold text-foreground font-jakarta">Research Team</h2>
@@ -1965,6 +2350,7 @@ function PlanningTaskForm({ onDone }: { onDone: () => void }) {
 }
 
 function PlanningPanel() {
+  const { canReview } = useLabPermissions();
   const [adding, setAdding] = useState(false);
   const { data: tasks } = usePlanningTasks();
   const { data: proposals } = usePlanningProposals();
@@ -2003,7 +2389,7 @@ function PlanningPanel() {
               <p className="text-foreground"><span className="font-semibold">{latest.proposed_assignments.length}</span> proposed assignment(s) · <span className="font-semibold">{latest.conflicts.length}</span> conflict(s)</p>
               {latest.proposed_assignments.map(item => <p key={item.task_id} className="text-muted-foreground">{item.title} → <span className="text-foreground font-medium">{item.personnel_name}</span></p>)}
               {latest.conflicts.map(item => <p key={item.task_id} className="text-amber-700">{item.title}: {item.reasons.join(" ")}</p>)}
-              {latest.status === "proposed" && <button onClick={() => approve.mutate(latest.id)} disabled={approve.isPending} className="mt-1 px-3 py-1.5 rounded-lg text-xs font-semibold bg-emerald-600 text-white disabled:opacity-50">{approve.isPending ? "Approving…" : "Approve conflict-free assignments"}</button>}
+              {latest.status === "proposed" && <button onClick={() => approve.mutate(latest.id)} disabled={approve.isPending || !canReview} title={!canReview ? "Reviewer role required" : undefined} className="mt-1 px-3 py-1.5 rounded-lg text-xs font-semibold bg-emerald-600 text-white disabled:opacity-50">{approve.isPending ? "Approving…" : "Approve conflict-free assignments"}</button>}
               {latest.status === "approved" && <p className="text-emerald-700 font-semibold">Approved by {latest.approved_by ?? "reviewer"}</p>}
             </div>
           )}
@@ -2053,7 +2439,7 @@ function AgentsPage({ setPage }: { setPage: (p: Page) => void }) {
         <div>
           <h2 className="text-xl font-bold text-foreground font-jakarta">AI Agents Control Center</h2>
           <p className="text-sm text-muted-foreground">
-            {agents.length} agents · {orchStatus ? `${orchStatus.evenements_traites} events routed · ${orchStatus.regles_actives} routing rules · ${orchStatus.alertes_actives} active alerts` : "connecting…"}
+            6 event-driven agents + 2 on-demand analysis modules · {orchStatus ? `${orchStatus.evenements_traites} events routed · ${orchStatus.regles_actives} routing rules · ${orchStatus.alertes_actives} active alerts` : "connecting…"}
           </p>
         </div>
         <div className="flex items-center gap-3">
@@ -2090,8 +2476,8 @@ function AgentsPage({ setPage }: { setPage: (p: Page) => void }) {
       <div className="mb-4 flex items-start gap-2 px-3 py-2 bg-muted/60 border border-border rounded-xl text-[11px] text-muted-foreground">
         <Info size={13} className="mt-0.5 shrink-0" />
         <span>
-          Activity counts come from the orchestrator's event history, which is held in memory by the API
-          process and resets on restart. Agents with no routed events show as idle rather than offline.
+          Activity counts come from the orchestrator's persisted event history. They show routed activity,
+          not uptime or a measure of scientific accuracy. Agents with no routed events show as idle.
         </span>
       </div>
 
@@ -2105,7 +2491,9 @@ function AgentsPage({ setPage }: { setPage: (p: Page) => void }) {
           // The orchestrator reports its own liveness via /status; for the other
           // agents the only honest signal is whether they have routed anything.
           const live = agent.key === "orchestrateur" ? orchOnline : events.length > 0;
-          const badge = live
+          const badge = agent.mode === "on-demand"
+            ? { color: "bg-blue-100 text-blue-700", dot: "bg-blue-500", label: "On demand" }
+            : live
             ? { color: "bg-emerald-100 text-emerald-700", dot: "bg-emerald-500 animate-pulse", label: "Active" }
             : { color: "bg-amber-100 text-amber-700", dot: "bg-amber-500", label: "Idle" };
           return (
@@ -2129,8 +2517,10 @@ function AgentsPage({ setPage }: { setPage: (p: Page) => void }) {
               <p className="text-[10px] text-muted-foreground leading-snug mb-3 line-clamp-3">{agent.desc}</p>
 
               <div className="mb-3 p-2 bg-muted/60 rounded-xl">
-                <div className="text-[9px] uppercase tracking-wide text-muted-foreground mb-0.5">Last routed event</div>
-                {last ? (
+                <div className="text-[9px] uppercase tracking-wide text-muted-foreground mb-0.5">{agent.mode === "on-demand" ? "Run model" : "Last routed event"}</div>
+                {agent.mode === "on-demand" ? (
+                  <div className="text-[10px] text-muted-foreground">Launch from the Digital Twins module.</div>
+                ) : last ? (
                   <>
                     <div className="text-[10px] font-semibold text-foreground font-mono truncate">{last.type_evenement}</div>
                     <div className="text-[9px] text-muted-foreground">{fmtWhen(last.timestamp)}</div>
@@ -2313,6 +2703,8 @@ function DigitalTwinsPage() {
   const [rainfallFactor, setRainfallFactor] = useState(SIM_PRESETS.baseline.rainfall_factor);
   const [etFactor, setEtFactor] = useState(SIM_PRESETS.baseline.et_factor);
   const [tempDelta, setTempDelta] = useState(SIM_PRESETS.baseline.temperature_delta_c);
+  const [waterQuota, setWaterQuota] = useState("");
+  const [dailyCap, setDailyCap] = useState("25");
 
   const applyPreset = (key: string) => {
     const p = SIM_PRESETS[key];
@@ -2332,6 +2724,7 @@ function DigitalTwinsPage() {
   const runOptimisation = useRunOptimisation();
   const { data: simRuns } = useSimulationRuns(effectiveId);
   const { data: optRuns } = useOptimisationRuns(effectiveId);
+  const approveOptimisation = useApproveOptimisationRun();
 
   // Real projection from the latest simulation run (runs come back newest-first).
   // Row shape is produced by agents/simulation/services/water_balance.py::_merge_series.
@@ -2628,13 +3021,31 @@ function DigitalTwinsPage() {
               </button>
               {runSim.isError && <p className="text-[10px] text-red-600 mt-1">{(runSim.error as Error).message}</p>}
               <button
-                onClick={() => effectiveId && runOptimisation.mutate(effectiveId)}
+                onClick={() => effectiveId && runOptimisation.mutate({
+                  parcelId: effectiveId,
+                  params: {
+                    max_irrigation_mm_per_day: Number(dailyCap) || 25,
+                    water_quota_mm: waterQuota.trim() === "" ? null : Number(waterQuota),
+                  },
+                })}
                 disabled={runOptimisation.isPending}
                 className="w-full py-2 border border-primary/30 text-primary text-xs font-bold rounded-xl hover:bg-primary/10 transition-all mt-2 flex items-center justify-center gap-2 disabled:opacity-60"
               >
                 <Target size={13} /> {runOptimisation.isPending ? "Optimising…" : "Optimise Irrigation"}
               </button>
               {runOptimisation.isError && <p className="text-[10px] text-red-600 mt-1">{(runOptimisation.error as Error).message}</p>}
+              <div className="grid grid-cols-2 gap-2 pt-1">
+                <label className="text-[10px] text-muted-foreground">
+                  Water quota (mm)
+                  <input value={waterQuota} onChange={e => setWaterQuota(e.target.value)} inputMode="decimal" placeholder="No limit"
+                    className="mt-1 w-full rounded-lg border border-border bg-background px-2 py-1.5 text-xs text-foreground" />
+                </label>
+                <label className="text-[10px] text-muted-foreground">
+                  Daily capacity (mm)
+                  <input value={dailyCap} onChange={e => setDailyCap(e.target.value)} inputMode="decimal"
+                    className="mt-1 w-full rounded-lg border border-border bg-background px-2 py-1.5 text-xs text-foreground" />
+                </label>
+              </div>
             </div>
           </div>
 
@@ -2668,6 +3079,13 @@ function DigitalTwinsPage() {
                   </ul>
                 ) : <p className="text-muted-foreground">No runs yet.</p>}
               </div>
+              {optRuns?.[0] && (
+                <OptimisationSchedulePanel
+                  run={optRuns[0]}
+                  onApprove={() => approveOptimisation.mutate(optRuns[0].id)}
+                  approving={approveOptimisation.isPending}
+                />
+              )}
             </div>
           </div>
         </div>
@@ -2677,6 +3095,143 @@ function DigitalTwinsPage() {
 }
 
 // ─── SENSOR READING INGESTION ────────────────────────────────────────────────
+
+function OptimisationSchedulePanel({ run, onApprove, approving }: {
+  run: OptimizationRun; onApprove: () => void; approving: boolean;
+}) {
+  const { canReview } = useLabPermissions();
+  const summary = run.summary as Record<string, unknown>;
+  return (
+    <div className="mt-4 rounded-xl border border-border bg-muted/30 p-3">
+      <div className="flex items-start justify-between gap-2 mb-2">
+        <div>
+          <p className="text-xs font-bold text-foreground">Complete irrigation schedule</p>
+          <p className="text-[10px] text-muted-foreground">
+            {run.water_quota_mm == null ? "No total quota" : `${run.water_quota_mm} mm quota`} · {run.max_irrigation_mm_per_day} mm/day cap
+          </p>
+        </div>
+        {!run.is_approved ? (
+          <button onClick={onApprove} disabled={approving || !canReview} title={!canReview ? "Reviewer role required" : undefined}
+            className="shrink-0 rounded-lg bg-primary px-2 py-1 text-[10px] font-bold text-primary-foreground disabled:opacity-60">
+            {approving ? "Approving…" : "Approve & create tasks"}
+          </button>
+        ) : <span className="text-[10px] font-bold text-emerald-700">Approved</span>}
+      </div>
+      <div className="max-h-48 overflow-auto">
+        <table className="w-full text-[10px]">
+          <thead className="text-muted-foreground"><tr><th className="pb-1 text-left">Date</th><th className="pb-1 text-right">Water</th><th className="pb-1 text-right">End moisture</th><th className="pb-1 text-right">Decision</th></tr></thead>
+          <tbody>{run.schedule.map((row, index) => {
+            const value = (key: string) => row[key] as string | number | boolean | undefined;
+            return <tr key={index} className="border-t border-border/60"><td className="py-1">{String(value("date") ?? "—")}</td><td className="py-1 text-right font-semibold">{Number(value("irrigation_mm") ?? 0).toFixed(1)} mm</td><td className="py-1 text-right">{Number(value("soil_moisture_end_mm") ?? 0).toFixed(1)}</td><td className="py-1 text-right capitalize">{String(value("decision") ?? "—")}</td></tr>;
+          })}</tbody>
+        </table>
+      </div>
+      <p className="mt-2 text-[10px] text-muted-foreground">Projected total: {String(summary.total_irrigation_mm ?? "—")} mm. Approval creates tasks only for irrigation days; staff confirm what was actually applied.</p>
+    </div>
+  );
+}
+
+function FieldOperationsPanel({ parcelId }: { parcelId: number }) {
+  const { data: sensors } = useSensorDevices(parcelId);
+  const { data: allReviews } = useMeasurementReviews("pending");
+  const { data: allTasks } = useFieldTasks("open");
+  const decide = useDecideMeasurementReview();
+  const complete = useCompleteFieldTask();
+  const provision = useProvisionSensorDevice();
+  const [notes, setNotes] = useState<Record<string, string>>({});
+  const [corrections, setCorrections] = useState<Record<string, string>>({});
+  const [amounts, setAmounts] = useState<Record<number, string>>({});
+  const [taskNotes, setTaskNotes] = useState<Record<number, string>>({});
+  const [sensorCode, setSensorCode] = useState("");
+  const [sensorName, setSensorName] = useState("");
+  const [provisionedToken, setProvisionedToken] = useState<string | null>(null);
+  const reviews = (allReviews ?? []).filter(review => review.parcel_id === parcelId);
+  const tasks = (allTasks ?? []).filter(task => task.parcel_id === parcelId);
+
+  const decideReview = (review: MeasurementReview, action: "accept" | "reject" | "annotate" | "correct") => {
+    const moisture = corrections[review.id];
+    decide.mutate({
+      reviewId: review.id,
+      action,
+      annotation: notes[review.id],
+      correction: action === "correct" && moisture?.trim() !== "" ? { soil_moisture_mm: Number(moisture) } : undefined,
+    });
+  };
+
+  const provisionSensor = (event: React.FormEvent) => {
+    event.preventDefault();
+    setProvisionedToken(null);
+    provision.mutate({
+      parcelId,
+      body: { code: sensorCode.trim(), name: sensorName.trim(), sensor_type: "soil_moisture" },
+    }, {
+      onSuccess: device => {
+        setProvisionedToken(device.gateway_token);
+        setSensorCode("");
+        setSensorName("");
+      },
+    });
+  };
+
+  return (
+    <div className="grid grid-cols-1 xl:grid-cols-3 gap-5">
+      <section className="bg-card border border-border rounded-2xl p-4">
+        <div className="flex items-center justify-between mb-3"><h3 className="text-sm font-bold text-foreground">Sensor health</h3><Wifi size={15} className="text-primary" /></div>
+        {!sensors?.length ? <p className="text-xs text-muted-foreground">No registered gateway yet. Register one below; its token is shown exactly once.</p> : <div className="space-y-2">{sensors.map(sensor => (
+          <div key={sensor.id} className="rounded-xl border border-border p-2.5 text-xs">
+            <div className="flex justify-between gap-2"><span className="font-semibold text-foreground">{sensor.name}</span><span className={`font-bold ${sensor.health === "healthy" ? "text-emerald-600" : "text-amber-600"}`}>{sensor.health.replace(/_/g, " ")}</span></div>
+            <p className="mt-1 text-muted-foreground font-mono">{sensor.code} · battery {sensor.battery_percent == null ? "—" : `${sensor.battery_percent}%`}</p>
+            <p className="text-[10px] text-muted-foreground">Last contact: {sensor.last_contact_at ? formatDate(sensor.last_contact_at) : "never"}</p>
+          </div>
+        ))}</div>}
+        <form className="mt-3 border-t border-border pt-3 space-y-2" onSubmit={provisionSensor}>
+          <p className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">Register gateway</p>
+          <input required minLength={3} value={sensorName} onChange={e => setSensorName(e.target.value)} placeholder="Device name" className="w-full rounded-lg border border-border bg-background px-2 py-1.5 text-xs" />
+          <input required minLength={3} value={sensorCode} onChange={e => setSensorCode(e.target.value)} placeholder="Unique device code" className="w-full rounded-lg border border-border bg-background px-2 py-1.5 text-xs font-mono" />
+          <button disabled={provision.isPending} className="w-full min-h-10 rounded-lg border border-primary/40 px-2 py-1.5 text-xs font-bold text-primary disabled:opacity-50">
+            {provision.isPending ? "Registering…" : "Register gateway"}
+          </button>
+          <FormError error={provision.error} />
+        </form>
+        {provisionedToken && <div className="mt-2 rounded-lg border border-amber-300 bg-amber-50 p-2 text-[10px] text-amber-950">
+          <p className="font-bold">Copy this credential now — it will not be shown again.</p>
+          <code className="mt-1 block break-all select-all rounded bg-white p-1.5">{provisionedToken}</code>
+          <p className="mt-1">Gateway headers: <code>X-Sensor-Code</code> and <code>X-Sensor-Token</code>.</p>
+        </div>}
+      </section>
+
+      <section className="bg-card border border-border rounded-2xl p-4">
+        <div className="flex items-center justify-between mb-3"><h3 className="text-sm font-bold text-foreground">Measurement review queue</h3><AlertCircle size={15} className={reviews.length ? "text-amber-500" : "text-emerald-600"} /></div>
+        {!reviews.length ? <p className="text-xs text-muted-foreground">No quarantined measurements for this parcel.</p> : <div className="space-y-3">{reviews.map(review => (
+          <div key={review.id} className="rounded-xl border border-amber-200 bg-amber-50/50 p-2.5 text-xs">
+            <p className="font-semibold text-foreground">Reading #{review.reading_id} · {review.quality_flag}</p>
+            <p className="mt-1 text-[10px] text-amber-800">{review.issues.join(" ")}</p>
+            <input value={notes[review.id] ?? ""} onChange={e => setNotes(v => ({ ...v, [review.id]: e.target.value }))} placeholder="Reviewer annotation"
+              className="mt-2 w-full rounded-lg border border-amber-200 bg-background px-2 py-1.5 text-xs" />
+            <div className="mt-2 flex flex-wrap gap-1.5">
+              <button onClick={() => decideReview(review, "accept")} className="min-h-9 rounded-lg bg-emerald-600 px-2 py-1 text-xs font-bold text-white">Accept</button>
+              <button onClick={() => decideReview(review, "reject")} className="min-h-9 rounded-lg border border-red-200 px-2 py-1 text-xs font-bold text-red-700">Reject</button>
+              <button onClick={() => decideReview(review, "annotate")} className="min-h-9 rounded-lg border border-border px-2 py-1 text-xs font-bold">Save note</button>
+            </div>
+            <div className="mt-2 flex gap-1.5"><input value={corrections[review.id] ?? ""} onChange={e => setCorrections(v => ({ ...v, [review.id]: e.target.value }))} inputMode="decimal" placeholder="Corrected moisture (mm)" className="min-w-0 flex-1 rounded-lg border border-amber-200 bg-background px-2 py-1.5 text-[10px]" /><button onClick={() => decideReview(review, "correct")} disabled={!corrections[review.id]} className="rounded-lg border border-primary/40 px-2 py-1 text-[10px] font-bold text-primary disabled:opacity-40">Correct</button></div>
+          </div>
+        ))}</div>}
+      </section>
+
+      <section className="bg-card border border-border rounded-2xl p-4">
+        <div className="flex items-center justify-between mb-3"><h3 className="text-sm font-bold text-foreground">Open irrigation tasks</h3><CheckCircle2 size={15} className="text-primary" /></div>
+        {!tasks.length ? <p className="text-xs text-muted-foreground">No approved irrigation task waiting on this parcel.</p> : <div className="space-y-2">{tasks.map(task => (
+          <div key={task.id} className="rounded-xl border border-border p-2.5 text-xs">
+            <div className="flex justify-between"><span className="font-semibold text-foreground">{task.scheduled_date}</span><span>{task.planned_amount_mm} mm planned</span></div>
+            <div className="mt-2 flex gap-1.5"><input aria-label="Actual water applied in millimetres" value={amounts[task.id] ?? String(task.planned_amount_mm)} onChange={e => setAmounts(v => ({ ...v, [task.id]: e.target.value }))} inputMode="decimal" className="min-w-0 flex-1 rounded-lg border border-border bg-background px-2 py-2 text-xs" /><button onClick={() => complete.mutate({ taskId: task.id, actual_amount_mm: Number(amounts[task.id] ?? task.planned_amount_mm), occurred_at: localNowForInput(), notes: taskNotes[task.id] })} disabled={!Number.isFinite(Number(amounts[task.id] ?? task.planned_amount_mm)) || Number(amounts[task.id] ?? task.planned_amount_mm) <= 0 || complete.isPending} className="min-h-10 rounded-lg bg-primary px-2 py-1 text-xs font-bold text-primary-foreground disabled:opacity-50">{complete.isPending ? "Saving…" : "Confirm applied"}</button></div>
+            <input aria-label="Optional field note" value={taskNotes[task.id] ?? ""} onChange={e => setTaskNotes(v => ({ ...v, [task.id]: e.target.value }))} placeholder="Optional field note" className="mt-2 w-full rounded-lg border border-border bg-background px-2 py-2 text-xs" />
+          </div>
+        ))}</div>}
+        <FormError error={complete.error} />
+      </section>
+    </div>
+  );
+}
 // The digital twin's whole water model runs off twin_sensor_readings, and until
 // now nothing in the UI could write a row to it. These two forms are the intake.
 //
@@ -3134,6 +3689,7 @@ function RecommendationPanel({ parcelId, parcel, readingCount, latestReadingAt, 
 }) {
   const recommend = useRecommend();
   const approveRecommendation = useApproveRecommendation();
+  const { canReview, canWrite } = useLabPermissions();
   const result = recommend.data;
   const history = parcel?.latest_recommendations ?? [];
 
@@ -3152,7 +3708,7 @@ function RecommendationPanel({ parcelId, parcel, readingCount, latestReadingAt, 
         </div>
         <button
           onClick={() => recommend.mutate(parcelId)}
-          disabled={readingCount === 0 || recommend.isPending}
+          disabled={!canWrite || readingCount === 0 || recommend.isPending}
           title={readingCount === 0
             ? "Needs at least one sensor reading — the model has nothing to compute from."
             : "Recompute from the most recent reading"}
@@ -3276,7 +3832,7 @@ function RecommendationPanel({ parcelId, parcel, readingCount, latestReadingAt, 
                 })() : (
                   <button
                     onClick={() => approveRecommendation.mutate({ recommendationId: h.id, parcelId })}
-                    disabled={approveRecommendation.isPending}
+                    disabled={!canReview || approveRecommendation.isPending} title={!canReview ? "Reviewer role required" : undefined}
                     className="ml-auto px-2 py-1 rounded-md border border-primary/30 text-primary font-semibold hover:bg-primary/10 disabled:opacity-50"
                   >
                     {approveRecommendation.isPending ? "Approving…" : "Approve"}
@@ -3305,7 +3861,7 @@ function eligibleCoverage(readings?: SensorReadingFull[]) {
   if (!readings || readings.length === 0) return null;
   const eligible = readings.filter(
     r => r.quality_flag === "ok" &&
-      (r.data_origin === "field" || r.data_origin === "field_import"),
+      ["field", "field_import", "gateway"].includes(r.data_origin) && ["not_required", "accepted", "corrected"].includes(r.review_status),
   );
   if (eligible.length === 0)
     return { days: 0, start: null, end: null, excluded: readings.length, duplicateDays: 0 };
@@ -3447,6 +4003,7 @@ function CalibrationPanel({ parcelId, parcel, readings }: {
   const [toApply, setToApply] = useState<CalibrationProfile | null>(null);
   const [reviewedBy, setReviewedBy] = useState("");
   const apply = useApplyCalibration();
+  const { canReview } = useLabPermissions();
 
   const coverage = eligibleCoverage(readings);
   const applied = profiles?.find(p => p.status === "applied") ?? null;
@@ -3542,7 +4099,7 @@ function CalibrationPanel({ parcelId, parcel, readings }: {
                   </div>
                   {p.status === "candidate" && (
                     <button
-                      onClick={() => { apply.reset(); setToApply(p); }}
+                      disabled={!canReview} title={!canReview ? "Reviewer role required" : undefined} onClick={() => { apply.reset(); setToApply(p); }}
                       className="shrink-0 flex items-center gap-1.5 text-xs font-semibold px-3 py-1.5 rounded-xl border border-border text-foreground hover:bg-card transition-colors"
                     >
                       <CheckCircle2 size={13} /> Apply
@@ -3554,8 +4111,8 @@ function CalibrationPanel({ parcelId, parcel, readings }: {
                     sub={`base ${p.parameters.base_crop_coefficient}`} />
                   <Stat label="Field capacity" value={`${p.parameters.field_capacity_mm.toFixed(1)} mm`}
                     sub={fc === null ? undefined : fc.identified ? "constrained by data" : "not identified"} />
-                  <Stat label="RMSE" value={`${p.metrics.rmse_mm.toFixed(2)} mm`}
-                    sub={`${p.metrics.validation_observations} days checked`} />
+                  <Stat label="Fit RMSE" value={`${p.metrics.rmse_mm.toFixed(2)} mm`}
+                    sub={`${p.metrics.fit_observations ?? p.metrics.validation_observations} fitted intervals; not independent validation`} />
                   <Stat label="Bias" value={`${p.metrics.bias_mm > 0 ? "+" : ""}${p.metrics.bias_mm.toFixed(2)} mm`}
                     sub={p.metrics.bias_mm > 0 ? "predicts wetter" : p.metrics.bias_mm < 0 ? "predicts drier" : "centred"} />
                 </div>
@@ -3641,7 +4198,7 @@ function CalibrationPanel({ parcelId, parcel, readings }: {
                 Cancel
               </button>
               <button type="button" onClick={confirmApply}
-                disabled={apply.isPending || reviewedBy.trim().length < 2}
+                disabled={!canReview || apply.isPending || reviewedBy.trim().length < 2}
                 className="flex-1 flex items-center justify-center gap-2 px-4 py-2 text-sm font-semibold rounded-xl bg-primary text-primary-foreground hover:opacity-90 disabled:opacity-50 transition-opacity">
                 {apply.isPending ? <Loader2 size={15} className="animate-spin" /> : <CheckCircle2 size={15} />}
                 {apply.isPending ? "Applying…" : "Apply calibration"}
@@ -3788,6 +4345,9 @@ function IoTPage() {
           </div>
         ))}
       </div>
+
+      {effectiveId && <ParcelEvidence key={effectiveId} parcelId={effectiveId} />}
+      {effectiveId && <FieldOperationsPanel parcelId={effectiveId} />}
 
       {effectiveId && (
         <RecommendationPanel
@@ -4216,11 +4776,75 @@ function AddSourceForm({ onDone }: { onDone: () => void }) {
   );
 }
 
+function ScientificWatchAssistant({ availableThemes }: { availableThemes: string[] }) {
+  const { data: subscriptions } = useWatchSubscriptions();
+  const { data: inbox } = useWatchInbox();
+  const { data: runs } = useCollectionRuns();
+  const create = useCreateWatchSubscription();
+  const update = useUpdateWatchSubscription();
+  const remove = useDeleteWatchSubscription();
+  const articleState = useUpdateArticleState();
+  const [keywords, setKeywords] = useState("");
+  const [themes, setThemes] = useState<string[]>([]);
+  const [frequency, setFrequency] = useState<"daily" | "weekly">("daily");
+
+  const createSubscription = (event: React.FormEvent) => {
+    event.preventDefault();
+    create.mutate({
+      keywords: keywords.split(",").map(term => term.trim()).filter(Boolean),
+      themes,
+      frequency,
+      active: true,
+    }, { onSuccess: () => { setKeywords(""); setThemes([]); } });
+  };
+
+  const unreadItems = (inbox ?? []).flatMap(digest => digest.items)
+    .filter(item => !item.article.state.read_at).length;
+  const lastRun = runs?.[0];
+
+  return (
+    <section className="grid grid-cols-1 xl:grid-cols-3 gap-4">
+      <div className="bg-card border border-border rounded-2xl p-4">
+        <div className="flex items-start justify-between gap-2 mb-3">
+          <div><h3 className="text-sm font-bold text-foreground">My research subscriptions</h3><p className="text-[10px] text-muted-foreground mt-1">Themes match AI tags; keywords search titles, abstracts, authors and DOI.</p></div>
+          <Bell size={15} className="text-primary shrink-0" />
+        </div>
+        <form className="space-y-2" onSubmit={createSubscription}>
+          <input value={keywords} onChange={event => setKeywords(event.target.value)} className="w-full rounded-lg border border-border bg-background px-2 py-2 text-xs" placeholder="Keywords, comma-separated (e.g. irrigation, groundwater)" />
+          {availableThemes.length > 0 && <div className="flex flex-wrap gap-1">
+            {availableThemes.slice(0, 10).map(theme => <button key={theme} type="button" onClick={() => setThemes(current => current.includes(theme) ? current.filter(value => value !== theme) : [...current, theme])} className={`rounded-full px-2 py-1 text-[10px] font-semibold ${themes.includes(theme) ? "bg-primary text-primary-foreground" : "bg-muted text-muted-foreground"}`}>{theme}</button>)}
+          </div>}
+          <div className="flex gap-2">
+            <select value={frequency} onChange={event => setFrequency(event.target.value as "daily" | "weekly")} className="flex-1 rounded-lg border border-border bg-background px-2 py-2 text-xs"><option value="daily">Daily digest</option><option value="weekly">Weekly digest</option></select>
+            <button disabled={create.isPending} className="rounded-lg bg-primary px-3 py-2 text-xs font-bold text-primary-foreground disabled:opacity-50">{create.isPending ? "Saving…" : "Subscribe"}</button>
+          </div>
+          <FormError error={create.error} />
+        </form>
+        <div className="mt-3 border-t border-border pt-3 space-y-2">
+          {!subscriptions?.length ? <p className="text-xs text-muted-foreground">No subscriptions yet. Add a focused topic or subscribe broadly with empty terms.</p> : subscriptions.map(subscription => <div key={subscription.id} className="rounded-xl bg-muted/50 px-2.5 py-2 text-xs">
+            <div className="flex items-start justify-between gap-2"><span className="font-semibold text-foreground">{[...subscription.keywords, ...subscription.themes].join(" · ") || "All new literature"}</span><button onClick={() => remove.mutate(subscription.id)} className="text-muted-foreground hover:text-red-600" aria-label="Remove subscription"><Trash2 size={13} /></button></div>
+            <div className="mt-1 flex items-center justify-between text-[10px] text-muted-foreground"><span>{subscription.frequency} · {subscription.last_digest_at ? `last sent ${formatDate(subscription.last_digest_at)}` : "starts with the next collection"}</span><button onClick={() => update.mutate({ id: subscription.id, active: !subscription.active })} className={`font-bold ${subscription.active ? "text-primary" : "text-muted-foreground"}`}>{subscription.active ? "Active" : "Paused"}</button></div>
+          </div>)}
+        </div>
+      </div>
+
+      <div className="xl:col-span-2 bg-card border border-border rounded-2xl p-4">
+        <div className="flex items-start justify-between gap-3 mb-3"><div><h3 className="text-sm font-bold text-foreground">Research review inbox</h3><p className="text-[10px] text-muted-foreground mt-1">{unreadItems ? `${unreadItems} unread match${unreadItems === 1 ? "" : "es"} needing review` : "No unread subscription matches."}</p></div><div className={`text-right text-[10px] ${lastRun?.status === "completed_with_warnings" || lastRun?.status === "failed" ? "text-amber-700" : "text-muted-foreground"}`}>{lastRun ? `${lastRun.status.replace(/_/g, " ")} ${formatDate(lastRun.completed_at ?? lastRun.started_at)} · ${lastRun.articles_collected} new${lastRun.error_message ? " · source warning recorded" : ""}` : "No collection runs yet"}</div></div>
+        {!inbox?.length ? <div className="rounded-xl border border-dashed border-border p-5 text-center text-xs text-muted-foreground">Your first digest appears after a subscription is due and a collection finds matching literature.</div> : <div className="space-y-3 max-h-72 overflow-y-auto pr-1">
+          {inbox.map(digest => <div key={digest.id} className="rounded-xl border border-border p-3"><p className="text-[10px] font-bold uppercase tracking-wide text-primary">{digest.frequency} digest · {formatDate(digest.period_start)} – {formatDate(digest.period_end)} · {digest.item_count} articles</p><div className="mt-2 space-y-2">{digest.items.map(({ article }) => <div key={article.id} className="flex items-start justify-between gap-3 text-xs"><div className="min-w-0"><p className={`font-semibold leading-snug ${article.state.read_at ? "text-muted-foreground" : "text-foreground"}`}>{article.title}</p><p className="mt-0.5 text-[10px] text-muted-foreground truncate">{article.authors?.join(", ") || "Authors unavailable"}{article.doi ? ` · DOI ${article.doi}` : ""}</p></div><div className="flex shrink-0 gap-1"><button onClick={() => articleState.mutate({ articleId: article.id, mark_read: !article.state.read_at })} className="rounded-lg border border-border px-2 py-1 text-[10px] font-bold">{article.state.read_at ? "Unread" : "Read"}</button><button onClick={() => articleState.mutate({ articleId: article.id, is_saved: !article.state.is_saved })} className={`rounded-lg px-2 py-1 text-[10px] font-bold ${article.state.is_saved ? "bg-primary/10 text-primary" : "border border-border"}`}>{article.state.is_saved ? "Saved" : "Save"}</button>{article.url && <a href={article.url} target="_blank" rel="noreferrer" onClick={() => articleState.mutate({ articleId: article.id, mark_read: true, mark_shared: true })} className="rounded-lg border border-border px-2 py-1 text-[10px] font-bold">Open</a>}</div></div>)}</div></div>)}
+        </div>}
+        <FormError error={articleState.error} />
+      </div>
+    </section>
+  );
+}
+
 function WatchPage() {
   const { data: articles, isLoading, error, refetch } = useArticles();
   const { data: sources } = useSources();
   const trigger = useTriggerScrape();
   const deleteSource = useDeleteSource();
+  const articleState = useUpdateArticleState();
   const [addOpen, setAddOpen] = useState(false);
   const activeSources = (sources ?? []).filter(s => s.active);
 
@@ -4342,9 +4966,10 @@ function WatchPage() {
           </div>
         )}
         {trigger.isSuccess && !trigger.isPending && (
-          <p className="mt-3 text-xs text-primary font-semibold">
-            Collection run finished. New articles appear in the feed below; duplicates are skipped.
-          </p>
+          <div role="status" className={`mt-3 text-xs font-semibold ${trigger.data.status === "completed" ? "text-primary" : "text-amber-700"}`}>
+            <p>{trigger.data.status === "failed" ? "Collection failed" : trigger.data.status === "completed_with_warnings" ? "Collection finished with warnings" : "Collection completed"} · {trigger.data.articles_collected} new articles.</p>
+            {trigger.data.error_message && <p className="mt-1 whitespace-pre-wrap">{trigger.data.error_message}</p>}
+          </div>
         )}
       </div>
 
@@ -4353,6 +4978,9 @@ function WatchPage() {
         subtitle="POST /api/veille/sources — the agent fetches active sources on each run">
         <AddSourceForm onDone={() => setAddOpen(false)} />
       </Modal>
+
+      <LiteratureReviewWorkspace />
+      <ScientificWatchAssistant availableThemes={topTags.map(([tag]) => tag)} />
 
       {/* Trending topics — real tag frequencies from the collected corpus */}
       <div className="bg-gradient-to-br from-[#0F3D2E] to-[#0B6E4F] rounded-2xl p-5 text-white">
@@ -4456,6 +5084,12 @@ function WatchPage() {
                 {a.summaries.length > 0 && (
                   <span className="flex items-center gap-1 text-[10px] text-muted-foreground"><Brain size={11} /> AI Summary</span>
                 )}
+                <button onClick={() => articleState.mutate({ articleId: a.id, mark_read: !a.state.read_at })} className="flex items-center gap-1 text-[10px] text-muted-foreground hover:text-primary transition-colors">
+                  <CheckCircle2 size={12} /> {a.state.read_at ? "Mark unread" : "Mark read"}
+                </button>
+                <button onClick={() => articleState.mutate({ articleId: a.id, is_saved: !a.state.is_saved })} className={`flex items-center gap-1 text-[10px] transition-colors ${a.state.is_saved ? "text-primary" : "text-muted-foreground hover:text-primary"}`}>
+                  <Bookmark size={12} fill={a.state.is_saved ? "currentColor" : "none"} /> {a.state.is_saved ? "Saved" : "Save"}
+                </button>
               </div>
             </div>
           );
@@ -4466,64 +5100,115 @@ function WatchPage() {
 }
 
 // ─── AI ASSISTANT PANEL ─────────────────────────────────────────────────────
-function AIAssistantPanel({ open, onClose }: { open: boolean; onClose: () => void }) {
+type AssistantAction = { label: string; page: Page };
+type AssistantMessage = { role: "ai" | "user"; text: string; action?: AssistantAction };
+
+function AIAssistantPanel({ open, onClose, onNavigate }: { open: boolean; onClose: () => void; onNavigate: (page: Page) => void }) {
   const [input, setInput] = useState("");
   const { data: aiArticles } = useArticles();
   const { data: aiResearchers } = useResearchers();
-  const [messages, setMessages] = useState([
-    { role: "ai", text: "Hello! I can search the lab's collected publications and researcher profiles. Ask me about a topic, method, or name." },
+  const { data: aiProjects } = useProjets();
+  const { data: aiParcels } = useParcels();
+  const { data: aiSources } = useSources();
+  const { data: pendingReviews } = useMeasurementReviews("pending");
+  const { data: aiAlerts } = useAlertes();
+  const [messages, setMessages] = useState<AssistantMessage[]>([
+    { role: "ai", text: "Hello! I can search the lab's collected publications and researcher profiles, report the workspace status, and point you to the next useful module. I only use data returned by the platform—I will not invent research or field results." },
   ]);
-  // Suggestions are the most frequent real tags on the collected articles, so a
-  // click always returns hits. (`Map` is the lucide icon in this file — use a
-  // record.) Falls back to nothing when no articles have been collected yet.
+
+  // Suggestions are either useful platform questions or the most frequent real
+  // article tags. They never use synthetic topics or hidden knowledge.
   const suggestionFreq: Record<string, number> = {};
-  for (const a of aiArticles ?? []) {
-    for (const t of a.tags) suggestionFreq[t.tag] = (suggestionFreq[t.tag] ?? 0) + 1;
+  for (const article of aiArticles ?? []) {
+    for (const tag of article.tags) suggestionFreq[tag.tag] = (suggestionFreq[tag.tag] ?? 0) + 1;
   }
-  const suggestions = Object.entries(suggestionFreq)
+  const topicSuggestions = Object.entries(suggestionFreq)
     .sort((a, b) => b[1] - a[1])
-    .slice(0, 4)
-    .map(([t]) => t);
+    .slice(0, 2)
+    .map(([tag]) => tag);
+  const suggestions = ["What can you help me with?", "What should I do next?", "Platform status", ...topicSuggestions].slice(0, 4);
 
-  // Local keyword search over live API data. Conversational answers would need a
-  // backend RAG endpoint — the API does not expose one yet.
-  const answer = (q: string): string => {
-    const terms = q.toLowerCase().split(/\s+/).filter(t => t.length > 2);
-    if (!terms.length) return "Try a longer query — single short words match too much.";
-
+  const answer = (question: string): AssistantMessage => {
+    const normalized = question.trim().toLowerCase();
     const articles = aiArticles ?? [];
     const researchers = aiResearchers ?? [];
-    const matches = (hay: string) => terms.some(t => hay.toLowerCase().includes(t));
+    const projects = aiProjects ?? [];
+    const parcels = aiParcels ?? [];
+    const sources = aiSources ?? [];
+    const reviews = pendingReviews ?? [];
+    const alerts = aiAlerts ?? [];
+    const dataStillLoading = [aiArticles, aiResearchers, aiProjects, aiParcels, aiSources, pendingReviews, aiAlerts].some(data => data === undefined);
 
-    const hitArticles = articles.filter(a =>
-      matches(a.title) ||
-      matches(a.abstract ?? "") ||
-      a.tags.some(t => matches(t.tag)),
-    );
-    const hitResearchers = researchers.filter(r => matches(r.name) || matches(r.department) || matches(r.role));
+    const nextAction = (): AssistantAction | undefined => {
+      if (projects.length === 0) return { label: "Create a project", page: "projects" };
+      if (researchers.length === 0) return { label: "Add a researcher", page: "researchers" };
+      if (sources.length === 0) return { label: "Configure Scientific Watch", page: "watch" };
+      if (parcels.length === 0) return { label: "Set up a field parcel", page: "iot" };
+      if (reviews.length > 0) return { label: "Review measurements", page: "iot" };
+      if (alerts.length > 0) return { label: "Review active alerts", page: "dashboard" };
+      return { label: "Open the dashboard", page: "dashboard" };
+    };
+
+    if (dataStillLoading) {
+      return { role: "ai", text: "I’m still loading the current workspace status. Please try again in a moment." };
+    }
+
+    if (/\b(help|what can|capabilit|how do i use)\b/.test(normalized)) {
+      return {
+        role: "ai",
+        text: "I can search collected literature and researcher profiles, summarise the current workspace status, and direct you to project, watch, IoT, Digital Twin, review or alert workflows. I do not replace scientific review or give unverified irrigation instructions.\n\nTry “What should I do next?”, “Platform status”, a research topic, or a researcher name.",
+        action: nextAction(),
+      };
+    }
+
+    if (/\b(status|what should i do next|what do i do next|next step|getting started|start)\b/.test(normalized)) {
+      const lines = [
+        `Current workspace: ${projects.length} project${projects.length === 1 ? "" : "s"}, ${researchers.length} researcher profile${researchers.length === 1 ? "" : "s"}, ${sources.length} watch source${sources.length === 1 ? "" : "s"}, ${articles.length} collected article${articles.length === 1 ? "" : "s"}, and ${parcels.length} field parcel${parcels.length === 1 ? "" : "s"}.`,
+        reviews.length ? `${reviews.length} measurement review${reviews.length === 1 ? " is" : "s are"} awaiting a decision.` : "No measurement reviews are awaiting a decision.",
+        alerts.length ? `${alerts.length} active alert${alerts.length === 1 ? "" : "s"} need attention.` : "No active alerts are currently reported.",
+      ];
+      return { role: "ai", text: lines.join("\n\n"), action: nextAction() };
+    }
+
+    if (/\b(watch|literature|publication|article|source|collect)\b/.test(normalized) && sources.length === 0) {
+      return { role: "ai", text: "Scientific Watch has no configured sources yet, so there is nothing safe to collect. Add an approved RSS, PubMed or other supported source first; then collection and review remain traceable.", action: { label: "Configure Scientific Watch", page: "watch" } };
+    }
+    if (/\b(sensor|iot|measurement|reading|irrigation|parcel)\b/.test(normalized) && parcels.length === 0) {
+      return { role: "ai", text: "No field parcel is configured yet. Create the parcel and its soil-water parameters before recording readings or requesting irrigation decision support. Recommendations require reviewed real field data and forecasts.", action: { label: "Set up a field parcel", page: "iot" } };
+    }
+    if (/\b(project|milestone|budget|equipment|risk)\b/.test(normalized) && projects.length === 0) {
+      return { role: "ai", text: "There are no research projects yet. Create the first project to manage milestones, deliverables, risks, equipment reservations and budget activity.", action: { label: "Create a project", page: "projects" } };
+    }
+    if (/\b(researcher|profile|cv|citation|bibliometric)\b/.test(normalized) && researchers.length === 0) {
+      return { role: "ai", text: "There are no researcher profiles yet. Add the authorised profile first; external indicator synchronisation should be checked before using it in a report.", action: { label: "Add a researcher", page: "researchers" } };
+    }
+
+    const terms = normalized.split(/\s+/).filter(term => term.length > 2);
+    if (!terms.length) return { role: "ai", text: "Try a longer query, a research topic, a researcher name, or “Platform status”." };
+    const matches = (haystack: string) => terms.some(term => haystack.toLowerCase().includes(term));
+    const hitArticles = articles.filter(article => matches(article.title) || matches(article.abstract ?? "") || article.tags.some(tag => matches(tag.tag)));
+    const hitResearchers = researchers.filter(researcher => matches(researcher.name) || matches(researcher.department) || matches(researcher.role));
 
     if (!hitArticles.length && !hitResearchers.length) {
-      return `No matches in ${articles.length} collected article${articles.length === 1 ? "" : "s"} or ${researchers.length} researcher profile${researchers.length === 1 ? "" : "s"}. Run the Scientific Watch agent to collect more literature.`;
+      const startMessage = articles.length === 0 && researchers.length === 0
+        ? "I do not have collected publications or researcher profiles to search yet. You can configure Scientific Watch or add an authorised researcher profile."
+        : `No matches were found in ${articles.length} collected article${articles.length === 1 ? "" : "s"} or ${researchers.length} researcher profile${researchers.length === 1 ? "" : "s"}.`;
+      return { role: "ai", text: startMessage, action: nextAction() };
     }
 
-    const parts: string[] = [
-      `Found ${hitArticles.length} article${hitArticles.length === 1 ? "" : "s"} and ${hitResearchers.length} researcher${hitResearchers.length === 1 ? "" : "s"} (searched ${articles.length} articles, ${researchers.length} profiles).`,
-    ];
+    const parts: string[] = [`Found ${hitArticles.length} article${hitArticles.length === 1 ? "" : "s"} and ${hitResearchers.length} researcher${hitResearchers.length === 1 ? "" : "s"} in the live workspace.`];
     if (hitArticles.length) {
-      parts.push("Publications: " + hitArticles.slice(0, 3).map(a => `“${a.title}”`).join("; "));
-      const summary = hitArticles.find(a => a.summaries.length)?.summaries[0]?.summary_text;
-      if (summary) parts.push("Summary: " + summary.slice(0, 260) + (summary.length > 260 ? "…" : ""));
+      parts.push("Publications: " + hitArticles.slice(0, 3).map(article => `“${article.title}”`).join("; "));
+      const summary = hitArticles.find(article => article.summaries.length)?.summaries[0]?.summary_text;
+      if (summary) parts.push("Stored summary: " + summary.slice(0, 260) + (summary.length > 260 ? "…" : ""));
     }
-    if (hitResearchers.length) {
-      parts.push("Researchers: " + hitResearchers.slice(0, 3).map(r => `${r.name} (${r.department})`).join("; "));
-    }
-    return parts.join("\n\n");
+    if (hitResearchers.length) parts.push("Researchers: " + hitResearchers.slice(0, 3).map(researcher => `${researcher.name} (${researcher.department})`).join("; "));
+    return { role: "ai", text: parts.join("\n\n") };
   };
 
-  const send = () => {
-    if (!input.trim()) return;
-    const q = input;
-    setMessages(m => [...m, { role: "user", text: q }, { role: "ai", text: answer(q) }]);
+  const send = (question = input) => {
+    if (!question.trim()) return;
+    setMessages(current => [...current, { role: "user", text: question }, answer(question)]);
     setInput("");
   };
   if (!open) return null;
@@ -4548,6 +5233,14 @@ function AIAssistantPanel({ open, onClose }: { open: boolean; onClose: () => voi
             <div className={`max-w-[85%] px-3 py-2 rounded-xl text-xs leading-relaxed whitespace-pre-line
               ${m.role === "user" ? "bg-primary text-white rounded-br-sm" : "bg-muted text-foreground rounded-bl-sm"}`}>
               {m.text}
+              {m.role === "ai" && m.action && (
+                <button
+                  onClick={() => { onNavigate(m.action!.page); onClose(); }}
+                  className="mt-2 block text-[10px] font-bold text-primary hover:underline"
+                >
+                  {m.action.label} →
+                </button>
+              )}
             </div>
           </div>
         ))}
@@ -4555,7 +5248,7 @@ function AIAssistantPanel({ open, onClose }: { open: boolean; onClose: () => voi
       {messages.length === 1 && (
         <div className="px-4 pb-2 space-y-1.5">
           {suggestions.map(s => (
-            <button key={s} onClick={() => { setInput(s); }} className="w-full text-left text-[10px] text-muted-foreground bg-muted hover:bg-secondary hover:text-foreground px-3 py-1.5 rounded-lg transition-colors">
+            <button key={s} onClick={() => send(s)} className="w-full text-left text-[10px] text-muted-foreground bg-muted hover:bg-secondary hover:text-foreground px-3 py-1.5 rounded-lg transition-colors">
               {s}
             </button>
           ))}
@@ -4565,7 +5258,7 @@ function AIAssistantPanel({ open, onClose }: { open: boolean; onClose: () => voi
         <div className="flex items-center gap-2 bg-muted rounded-xl px-3 py-2">
           <input value={input} onChange={e => setInput(e.target.value)} onKeyDown={e => e.key === "Enter" && send()}
             placeholder="Ask anything..." className="flex-1 bg-transparent text-xs text-foreground placeholder:text-muted-foreground focus:outline-none" />
-          <button onClick={send} className="w-6 h-6 bg-primary rounded-lg flex items-center justify-center hover:bg-primary/90 transition-colors">
+          <button onClick={() => send()} className="w-6 h-6 bg-primary rounded-lg flex items-center justify-center hover:bg-primary/90 transition-colors">
             <Send size={11} className="text-white" />
           </button>
         </div>
@@ -4575,7 +5268,7 @@ function AIAssistantPanel({ open, onClose }: { open: boolean; onClose: () => voi
 }
 
 // ─── VISITOR PORTAL PAGE ─────────────────────────────────────────────────────
-function VisitorPortalPage({ onAdminLogin }: { onAdminLogin?: () => void } = {}) {
+export function LegacyVisitorExperience({ onAdminLogin }: { onAdminLogin?: () => void } = {}) {
   const { signIn, signUp } = useAuth();
   const { data: dbArticles } = useArticles();
   const { data: dbResearchersData } = useResearchers();
@@ -5388,6 +6081,71 @@ function VisitorPortalPage({ onAdminLogin }: { onAdminLogin?: () => void } = {})
   );
 }
 
+/** Public view. It reads only /api/public, never an internal agent endpoint. */
+function VisitorPortalPage({ onAdminLogin }: { onAdminLogin?: () => void } = {}) {
+  const publications = usePublicPublications();
+  const researchers = usePublicResearchers();
+  const projects = usePublicProjects();
+  const datasets = usePublicDatasets();
+  const loading = publications.isLoading || researchers.isLoading || projects.isLoading || datasets.isLoading;
+  const errors = [publications.error, researchers.error, projects.error, datasets.error].filter(Boolean);
+
+  return (
+    <div className="h-full overflow-y-auto bg-gradient-to-b from-emerald-50/60 via-background to-background">
+      <header className="sticky top-0 z-20 border-b border-border bg-white/90 backdrop-blur-md">
+        <div className="max-w-6xl mx-auto px-6 h-16 flex items-center gap-3">
+          <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-primary to-[#2D9C72] flex items-center justify-center"><FlaskConical size={18} className="text-white" /></div>
+          <div><p className="font-bold text-foreground font-jakarta">LRSTE Research Portal</p><p className="text-[10px] text-muted-foreground">Reviewed public research and open-data catalogue</p></div>
+          <div className="flex-1" />
+          {onAdminLogin && <button onClick={onAdminLogin} className="px-3 py-2 text-xs font-semibold text-primary border border-primary/25 rounded-xl hover:bg-primary/5">Lab sign in</button>}
+        </div>
+      </header>
+
+      <main className="max-w-6xl mx-auto px-6 py-10 space-y-10">
+        <section className="max-w-3xl">
+          <span className="text-xs font-bold uppercase tracking-[0.2em] text-primary">LRSTE · public catalogue</span>
+          <h1 className="mt-3 text-4xl font-extrabold tracking-tight text-foreground font-jakarta">Research the lab has chosen to share.</h1>
+          <p className="mt-4 text-sm leading-6 text-muted-foreground">Browse reviewed publications, project summaries, consented researcher profiles, licensed dataset metadata, and administrator-published news, events and theses. Internal operations and field data remain private.</p>
+        </section>
+
+        {errors.length > 0 && <div className="rounded-2xl border border-red-200 bg-red-50 p-4 text-sm text-red-700">The public catalogue could not be loaded: {(errors[0] as Error).message}</div>}
+        {loading && <div className="flex items-center gap-2 text-sm text-muted-foreground"><Loader2 size={16} className="animate-spin" />Loading reviewed public content…</div>}
+
+        <section className="grid grid-cols-2 md:grid-cols-4 gap-3">
+          {[
+            ["Publications", publications.data?.length ?? 0, BookOpen],
+            ["Researchers", researchers.data?.length ?? 0, Users],
+            ["Project summaries", projects.data?.length ?? 0, FolderKanban],
+            ["Open datasets", datasets.data?.length ?? 0, Database],
+          ].map(([label, count, Icon]) => {
+            const CardIcon = Icon as typeof BookOpen;
+            return <div key={label as string} className="bg-card border border-border rounded-2xl p-4"><CardIcon size={17} className="text-primary mb-3" /><p className="text-2xl font-bold">{count as number}</p><p className="text-xs text-muted-foreground">{label as string}</p></div>;
+          })}
+        </section>
+
+        <section>
+          <div className="flex items-end justify-between mb-4"><div><h2 className="text-xl font-bold font-jakarta">Latest publications</h2><p className="text-xs text-muted-foreground mt-1">Approved records from the laboratory bibliography.</p></div></div>
+          <div className="grid md:grid-cols-2 gap-4">
+            {(publications.data ?? []).slice(0, 6).map(item => <article key={item.id} className="bg-card border border-border rounded-2xl p-5"><div className="flex flex-wrap gap-1.5 mb-3">{item.keywords.map(keyword => <span key={keyword} className="px-2 py-0.5 text-[10px] rounded-full bg-primary/10 text-primary">{keyword}</span>)}</div><h3 className="font-bold text-sm leading-snug">{item.title}</h3><p className="mt-2 text-xs leading-5 text-muted-foreground line-clamp-3">{item.abstract || "No abstract has been approved for public display."}</p><div className="mt-4 text-[11px] text-muted-foreground">{item.journal || "Laboratory bibliography"}{item.year ? ` · ${item.year}` : ""}{item.doi && <a className="ml-2 text-primary font-semibold" href={`https://doi.org/${item.doi}`} target="_blank" rel="noreferrer">DOI ↗</a>}</div></article>)}
+            {!loading && !(publications.data?.length) && <p className="text-sm text-muted-foreground">No publications have been approved for public display yet.</p>}
+          </div>
+        </section>
+
+        <section className="grid lg:grid-cols-2 gap-8">
+          <div><h2 className="text-xl font-bold font-jakarta mb-4">Research projects</h2><div className="space-y-3">{(projects.data ?? []).map(item => <article key={item.id} className="bg-card border border-border rounded-2xl p-4"><p className="text-xs font-bold text-primary">{item.research_area || "Research"}</p><h3 className="mt-1 font-bold">{item.title}</h3><p className="mt-2 text-xs leading-5 text-muted-foreground">{item.summary}</p></article>)}{!loading && !(projects.data?.length) && <p className="text-sm text-muted-foreground">No project summaries have been published yet.</p>}</div></div>
+          <div><h2 className="text-xl font-bold font-jakarta mb-4">Open datasets</h2><div className="space-y-3">{(datasets.data ?? []).map(item => <article key={item.id} className="bg-card border border-border rounded-2xl p-4"><div className="flex justify-between gap-3"><h3 className="font-bold">{item.title}</h3><span className="text-xs text-muted-foreground">v{item.version}</span></div><p className="mt-2 text-xs leading-5 text-muted-foreground">{item.description}</p><div className="mt-3 flex items-center gap-3 text-[11px]"><span className="font-semibold text-foreground">{item.license}</span>{item.access_url && <a href={item.access_url} target="_blank" rel="noreferrer" className="font-semibold text-primary">Access dataset ↗</a>}</div></article>)}{!loading && !(datasets.data?.length) && <p className="text-sm text-muted-foreground">No datasets have been published yet.</p>}</div></div>
+        </section>
+
+        <InstitutionalContent kind="news" publicOnly />
+        <InstitutionalContent kind="events" publicOnly />
+        <InstitutionalContent kind="theses" publicOnly />
+
+        <section><h2 className="text-xl font-bold font-jakarta mb-4">Researchers</h2><div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-4">{(researchers.data ?? []).map(item => <article key={item.id} className="bg-card border border-border rounded-2xl p-4"><div className="w-9 h-9 rounded-xl bg-primary/10 text-primary flex items-center justify-center font-bold">{initialsOf(item.name)}</div><h3 className="mt-3 font-bold">{item.name}</h3><p className="text-xs text-primary">{item.role}</p><p className="text-xs text-muted-foreground mt-1">{item.department}</p>{item.public_bio && <p className="mt-3 text-xs leading-5 text-muted-foreground">{item.public_bio}</p>}</article>)}{!loading && !(researchers.data?.length) && <p className="text-sm text-muted-foreground">No researcher profiles have been published yet.</p>}</div></section>
+      </main>
+    </div>
+  );
+}
+
 // ─── WELCOME / ENTRY PAGE ────────────────────────────────────────────────────
 function WelcomePage({ onGuest, onAdmin }: { onGuest: () => void; onAdmin: () => void }) {
   const [adminMode, setAdminMode] = useState(false);
@@ -5461,7 +6219,7 @@ function WelcomePage({ onGuest, onAdmin }: { onGuest: () => void; onAdmin: () =>
           <div>
             <div className="inline-flex items-center gap-2 px-3 py-1.5 bg-white/8 border border-white/12 rounded-full text-xs text-white/70 mb-8">
               <div className="w-2 h-2 bg-accent rounded-full animate-pulse" />
-              World-Class Scientific Ecosystem
+              Laboratory Operations Prototype
             </div>
             <h1 className="text-5xl xl:text-6xl font-extrabold text-white font-jakarta leading-tight mb-4">
               Advancing<br />
@@ -5471,7 +6229,7 @@ function WelcomePage({ onGuest, onAdmin }: { onGuest: () => void; onAdmin: () =>
               <span className={`inline-block w-0.5 h-12 bg-accent ml-1 align-middle ${cursor ? "opacity-100" : "opacity-0"} transition-opacity`} />
             </h1>
             <p className="text-white/50 text-lg max-w-md leading-relaxed">
-              An integrated research ecosystem combining AI agents, digital twins, IoT monitoring, and GIS intelligence to accelerate environmental science.
+              Connect scientific monitoring, project operations and reviewed parcel-water decisions in one laboratory workspace.
             </p>
 
             {/* Stats — real counts; "—" while unauthenticated or still loading,
@@ -5481,7 +6239,7 @@ function WelcomePage({ onGuest, onAdmin }: { onGuest: () => void; onAdmin: () =>
                 { value: wpArticles ? String(wpArticles.length) : "—", label: "Publications" },
                 { value: wpResearchers ? String(wpResearchers.length) : "—", label: "Researchers" },
                 { value: wpParcels ? String(wpParcels.length) : "—", label: "Monitored Parcels" },
-                { value: "8", label: "AI Agents" },
+                { value: "8", label: "Workflow modules" },
               ].map(s => (
                 <div key={s.label}>
                   <div className="text-2xl font-extrabold text-white font-jakarta">{s.value}</div>
@@ -5494,10 +6252,10 @@ function WelcomePage({ onGuest, onAdmin }: { onGuest: () => void; onAdmin: () =>
           {/* Bottom features */}
           <div className="flex gap-3">
             {[
-              { icon: Bot, label: "8 AI Agents" },
+              { icon: Bot, label: "Agent workflows" },
               { icon: Cpu, label: "Digital Twins" },
-              { icon: Wifi, label: "Live IoT Grid" },
-              { icon: Map, label: "GIS Maps" },
+              { icon: Wifi, label: "Field measurements" },
+              { icon: Map, label: "GIS Maps (planned)" },
             ].map(f => (
               <div key={f.label} className="flex items-center gap-2 px-3 py-2 bg-white/6 border border-white/10 rounded-xl text-white/60 text-xs">
                 <f.icon size={13} className="text-accent" />
@@ -5581,8 +6339,8 @@ function WelcomePage({ onGuest, onAdmin }: { onGuest: () => void; onAdmin: () =>
                 </div>
 
                 <p className="text-center text-[10px] text-white/25 mt-6 leading-relaxed">
-                  By entering, you agree to our Terms of Service and Privacy Policy.<br />
-                  LabAI Research Institute · Open Science Initiative
+                  Public access shows reviewed content. Internal access requires a laboratory account.<br />
+                  LRSTE · Laboratory research workspace
                 </p>
               </div>
             ) : (
@@ -5679,7 +6437,7 @@ function WelcomePage({ onGuest, onAdmin }: { onGuest: () => void; onAdmin: () =>
 // These mirror the backend schemas in agents/mis/schemas.py. They are used by the
 // AdminPage to let users create entities that the Quality agent can then validate.
 
-function NewPersonnelForm({ onDone }: { onDone: () => void }) {
+function NewPersonnelForm({ onDone, projectId }: { onDone: () => void; projectId?: string }) {
   const create = useCreatePersonnel();
   const [nom, setNom] = useState("");
   const [prenom, setPrenom] = useState("");
@@ -5693,7 +6451,7 @@ function NewPersonnelForm({ onDone }: { onDone: () => void }) {
       create.mutate({
         nom: nom.trim(), prenom: prenom.trim(), email: email.trim(), role,
         competences: competences.split(",").map(s => s.trim()).filter(Boolean),
-        disponible: true,
+        disponible: true, projet_actuel_id: projectId,
       }, { onSuccess: onDone });
     }}>
       <div className="grid grid-cols-2 gap-4">
@@ -5764,10 +6522,10 @@ function NewEquipementForm({ onDone }: { onDone: () => void }) {
   );
 }
 
-function NewBudgetForm({ onDone }: { onDone: () => void }) {
+function NewBudgetForm({ onDone, initialProjectId = "" }: { onDone: () => void; initialProjectId?: string }) {
   const create = useCreateBudget();
   const { data: projets } = useProjets();
-  const [projetId, setProjetId] = useState("");
+  const [projetId, setProjetId] = useState(initialProjectId);
   const [alloue, setAlloue] = useState("0");
   const [devise, setDevise] = useState("EUR");
   const [dateDebut, setDateDebut] = useState(new Date().toISOString().slice(0, 10));
@@ -5813,6 +6571,55 @@ function NewBudgetForm({ onDone }: { onDone: () => void }) {
         <SubmitButton pending={create.isPending} label="Add budget" />
       </div>
     </form>
+  );
+}
+
+function PublicCurationPanel({ projects, canApprove }: { projects: Projet[]; canApprove: boolean }) {
+  const [projectId, setProjectId] = useState("");
+  const [projectSummary, setProjectSummary] = useState("");
+  const [projectArea, setProjectArea] = useState("");
+  const [datasetTitle, setDatasetTitle] = useState("");
+  const [datasetDescription, setDatasetDescription] = useState("");
+  const [datasetVersion, setDatasetVersion] = useState("1.0.0");
+  const [datasetLicense, setDatasetLicense] = useState("CC BY 4.0");
+  const curatedProjects = useCuratedProjects();
+  const curatedDatasets = useCuratedDatasets();
+  const submitProject = useSubmitPublicProject();
+  const submitDataset = useSubmitPublicDataset();
+  const setProjectStatus = useSetPublicProjectStatus();
+  const setDatasetStatus = useSetPublicDatasetStatus();
+
+  return (
+    <section className="bg-card border border-border rounded-2xl overflow-hidden">
+      <div className="p-5 border-b border-border">
+        <h3 className="font-bold text-foreground font-jakarta">Public publishing and consent</h3>
+        <p className="text-xs text-muted-foreground mt-1">Content is submitted as a draft. Only a reviewer can publish it to the anonymous public portal; internal budgets, staffing, risks and field data are never copied.</p>
+      </div>
+      <div className="grid xl:grid-cols-2 gap-px bg-border">
+        <div className="p-5 bg-card space-y-4">
+          <h4 className="text-sm font-bold">Submit a project summary</h4>
+          <form className="space-y-2" onSubmit={event => { event.preventDefault(); if (projectId && projectSummary.trim()) submitProject.mutate({ project_id: projectId, summary: projectSummary.trim(), research_area: projectArea.trim() || undefined }, { onSuccess: () => { setProjectSummary(""); setProjectArea(""); } }); }}>
+            <select className={inputCls} required value={projectId} onChange={event => setProjectId(event.target.value)}><option value="">Select internal project…</option>{projects.map(project => <option key={project.id} value={project.id}>{project.nom}</option>)}</select>
+            <input className={inputCls} value={projectArea} onChange={event => setProjectArea(event.target.value)} placeholder="Research area (e.g. irrigation)" />
+            <textarea className={inputCls} rows={3} required minLength={20} value={projectSummary} onChange={event => setProjectSummary(event.target.value)} placeholder="Public summary—do not include budgets, staff details, risks, or unpublished results." />
+            <div className="flex justify-end"><SubmitButton pending={submitProject.isPending} label="Submit draft" /></div>
+          </form>
+          <FormError error={submitProject.error} />
+          <div className="space-y-2">{(curatedProjects.data ?? []).map(item => <div key={item.id} className="flex items-center justify-between gap-3 border border-border rounded-xl px-3 py-2 text-xs"><span className="truncate">{item.title} · <span className="text-muted-foreground">{item.status}</span></span>{canApprove && item.status !== "published" && <button onClick={() => setProjectStatus.mutate({ id: item.id, status: "published" })} className="shrink-0 text-primary font-bold">Publish</button>}</div>)}</div>
+        </div>
+        <div className="p-5 bg-card space-y-4">
+          <h4 className="text-sm font-bold">Register a dataset</h4>
+          <form className="space-y-2" onSubmit={event => { event.preventDefault(); if (datasetTitle.trim() && datasetDescription.trim()) submitDataset.mutate({ title: datasetTitle.trim(), description: datasetDescription.trim(), version: datasetVersion.trim(), license: datasetLicense.trim() }, { onSuccess: () => { setDatasetTitle(""); setDatasetDescription(""); } }); }}>
+            <div className="grid grid-cols-2 gap-2"><input className={inputCls} required value={datasetTitle} onChange={event => setDatasetTitle(event.target.value)} placeholder="Dataset title" /><input className={inputCls} required value={datasetVersion} onChange={event => setDatasetVersion(event.target.value)} placeholder="Version" /></div>
+            <input className={inputCls} required value={datasetLicense} onChange={event => setDatasetLicense(event.target.value)} placeholder="License" />
+            <textarea className={inputCls} rows={3} required minLength={20} value={datasetDescription} onChange={event => setDatasetDescription(event.target.value)} placeholder="Public metadata and scope—no raw restricted data." />
+            <div className="flex justify-end"><SubmitButton pending={submitDataset.isPending} label="Submit draft" /></div>
+          </form>
+          <FormError error={submitDataset.error} />
+          <div className="space-y-2">{(curatedDatasets.data ?? []).map(item => <div key={item.id} className="flex items-center justify-between gap-3 border border-border rounded-xl px-3 py-2 text-xs"><span className="truncate">{item.title} v{item.version} · <span className="text-muted-foreground">{item.status}</span></span>{canApprove && item.status !== "published" && <button onClick={() => setDatasetStatus.mutate({ id: item.id, status: "published" })} className="shrink-0 text-primary font-bold">Publish</button>}</div>)}</div>
+        </div>
+      </div>
+    </section>
   );
 }
 
@@ -6026,6 +6833,8 @@ function AdminPage() {
         </div>
       </div>
 
+      <PublicCurationPanel projects={projets ?? []} canApprove={user?.role === "reviewer" || user?.role === "administrator"} />
+
       {/* Session & access — real values, no user-management endpoint exists yet */}
       <div className="bg-card border border-border rounded-2xl overflow-hidden">
         <div className="p-5 border-b border-border">
@@ -6128,11 +6937,11 @@ export default function App() {
       case "twins": return <DigitalTwinsPage />;
       case "iot": return <IoTPage />;
       case "watch": return <WatchPage />;
-      case "theses": return <PlaceholderPage title="Theses & Masters" desc="Track PhD and master's theses, progress, supervisors and defence calendars." missing="there is no thesis model or endpoint in the backend. Supervision could be derived from MIS staff and projects." icon={GraduationCap} />;
+      case "theses": return <InstitutionalContent key="theses" kind="theses" />;
       case "gis": return <PlaceholderPage title="GIS Maps & Spatial Analytics" desc="Interactive spatial mapping and environmental overlay layers." missing="no map layer is served yet. Parcels already carry latitude/longitude via /api/twin/parcels, which is enough to plot them." icon={Map} />;
-      case "datasets": return <PlaceholderPage title="Open Data Portal" desc="Published datasets with API access and downloads." missing="no dataset model exists. The closest real data are the monitored sources (/api/veille/sources) and parcel readings (/api/twin/parcels)." icon={Database} />;
-      case "events": return <PlaceholderPage title="Events & Conferences" desc="Scientific events timeline, registration and post-event archives." missing="no event or conference model exists in the backend." icon={Globe} />;
-      case "news": return <PlaceholderPage title="News & Updates" desc="Lab announcements and media coverage." missing="no news model exists. The scientific watch feed (/api/veille/articles) is the live alternative." icon={Newspaper} />;
+      case "datasets": return <PlaceholderPage title="Open Data Catalogue" desc="The public visitor portal exposes approved dataset metadata, licences, citations and access links." missing="internal catalogue curation is managed through the public-governance API; a dedicated staff catalogue screen is the remaining UI work." icon={Database} />;
+      case "events": return <InstitutionalContent key="events" kind="events" />;
+      case "news": return <InstitutionalContent key="news" kind="news" />;
       case "admin": return <AdminPage />;
       case "agents": return <AgentsPage setPage={setPage} />;
       case "visitor": return <VisitorPortalPage />;
@@ -6163,7 +6972,7 @@ export default function App() {
     return (
       <div style={{ fontFamily: "'Plus Jakarta Sans', 'Inter', sans-serif" }}>
         <VisitorPortalPage onAdminLogin={() => { setEntry("admin"); setPage("home"); }} />
-        <AIAssistantPanel open={aiOpen} onClose={() => setAiOpen(false)} />
+        <AIAssistantPanel open={aiOpen} onClose={() => setAiOpen(false)} onNavigate={(nextPage) => { setEntry("admin"); setPage(nextPage); }} />
         {FAB}
       </div>
     );
@@ -6180,7 +6989,7 @@ export default function App() {
         </main>
       </div>
 
-      <AIAssistantPanel open={aiOpen} onClose={() => setAiOpen(false)} />
+      <AIAssistantPanel open={aiOpen} onClose={() => setAiOpen(false)} onNavigate={setPage} />
       {FAB}
     </div>
   );

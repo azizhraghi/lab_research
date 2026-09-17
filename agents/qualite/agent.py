@@ -10,6 +10,7 @@ from typing import Optional
 from uuid import uuid4
 
 from shared.base_agent import BaseAgent
+from shared.outbox import enqueue_event, outbox_dispatcher
 from shared.schemas import Event, AgentAction, ActionResult
 from agents.qualite.schemas import RapportQualite, NiveauQualite
 
@@ -32,13 +33,10 @@ class QualiteAgent(BaseAgent):
 
     async def _on_bus_event(self, event: Event) -> None:
         """Bus callback — only act on explicit quality validation requests."""
-        try:
-            if event.type == "qualite.validation_demandee":
-                await self.handle_event(event)
-            elif event.type == "twin.reading_recorded":
-                await self._validate_twin_reading(event)
-        except Exception as e:
-            print(f"[{self.name}] Error handling {event.type}: {e}")
+        if event.type == "qualite.validation_demandee":
+            await self.handle_event(event)
+        elif event.type == "twin.reading_recorded":
+            await self._validate_twin_reading(event)
 
     async def _validate_twin_reading(self, event: Event) -> None:
         """Compute the reading's quality flag and gate automatic advice on it.
@@ -51,12 +49,22 @@ class QualiteAgent(BaseAgent):
         auto-recommendation and the calibrator (which filters on quality_flag)
         never consume data a human has not cleared.
         """
-        from agents.qualite.services.anomaly import verdict_for
-
         payload = event.payload
         parcel_id = payload.get("parcel_id")
         reading_id = payload.get("reading_id")
         reading = payload.get("reading") or {}
+
+        # Read current persisted state, not an old queued snapshot. A reviewed
+        # decision must survive duplicate delivery of its ingestion event.
+        from shared.database import AsyncSessionLocal
+        from agents.digitaltwin.models import SensorReading
+        from agents.digitaltwin.schemas import SensorReadingResponse
+        async with AsyncSessionLocal() as db:
+            current = await db.get(SensorReading, reading_id) if isinstance(reading_id, int) else None
+            if current is not None:
+                if current.review_status != "pending_validation":
+                    return
+                reading = SensorReadingResponse.model_validate(current).model_dump(mode="json")
 
         issues: list[str] = []
         if not isinstance(parcel_id, int) or not isinstance(reading_id, int):
@@ -67,21 +75,40 @@ class QualiteAgent(BaseAgent):
             verdict = await self._assess_reading(parcel_id, reading_id, reading)
             issues = verdict.issues
 
-        if verdict is not None and verdict.flag != reading.get("quality_flag", "ok"):
-            await self._persist_reading_flag(reading_id, verdict.flag)
+        # Persist the verdict and the next event in one transaction so a
+        # quality-approved reading can never be stranded without triggering
+        # the recommendation workflow.
+        from shared.database import AsyncSessionLocal
+        from agents.digitaltwin.models import SensorReading
+        from agents.qualite.models import MeasurementReviewDB
 
-        await self.emit_event("events", Event(
-            id=str(uuid4()),
-            type="twin.reading_validated" if not issues else "twin.reading_rejected",
-            source_agent=self.name,
-            payload={
-                "parcel_id": parcel_id,
-                "reading_id": reading_id,
-                "quality_flag": verdict.flag if verdict else "error",
-                "issues": issues,
-                "review_required": True,
-            },
-        ))
+        async with AsyncSessionLocal() as db:
+            row = await db.get(SensorReading, reading_id) if isinstance(reading_id, int) else None
+            if row is None:
+                raise ValueError(f"Reading {reading_id!r} no longer exists")
+            if verdict is not None:
+                row.quality_flag = verdict.flag
+            row.quality_issues = issues
+            row.review_status = "pending" if issues else "not_required"
+            if issues:
+                db.add(MeasurementReviewDB(
+                    id=str(uuid4()), reading_id=str(reading_id), parcel_id=str(parcel_id),
+                    status="pending", quality_flag=verdict.flag if verdict else "error", issues=issues,
+                ))
+            await enqueue_event(db, "events", Event(
+                id=str(uuid4()),
+                type="twin.reading_validated" if not issues else "twin.reading_rejected",
+                source_agent=self.name,
+                payload={
+                    "parcel_id": parcel_id,
+                    "reading_id": reading_id,
+                    "quality_flag": verdict.flag if verdict else "error",
+                    "issues": issues,
+                    "review_required": True,
+                },
+            ))
+            await db.commit()
+        outbox_dispatcher.notify()
 
     async def _assess_reading(self, parcel_id: int, reading_id: int, reading: dict):
         """Load the context the physical checks need, then run them.
@@ -100,6 +127,7 @@ class QualiteAgent(BaseAgent):
         async with AsyncSessionLocal() as db:
             parcel = await db.get(Parcel, parcel_id)
             field_capacity = parcel.field_capacity_mm if parcel else None
+            observed_at = datetime.fromisoformat(str(reading["recorded_at"]))
 
             previous_row = (
                 await db.execute(
@@ -107,6 +135,9 @@ class QualiteAgent(BaseAgent):
                     .where(
                         SensorReading.parcel_id == parcel_id,
                         SensorReading.id != reading_id,
+                        SensorReading.recorded_at < observed_at,
+                        SensorReading.quality_flag == "ok",
+                        SensorReading.review_status.in_(["not_required", "accepted", "corrected"]),
                     )
                     .order_by(SensorReading.recorded_at.desc())
                     .limit(1)

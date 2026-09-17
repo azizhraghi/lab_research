@@ -2,7 +2,7 @@ from collections.abc import Callable
 from typing import Optional
 
 import httpx
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
 
@@ -15,7 +15,7 @@ bearer_scheme = HTTPBearer(auto_error=False)
 class User(BaseModel):
     id: str
     email: Optional[str] = None
-    role: str = "researcher"
+    role: str = "viewer"
 
 
 def _authentication_unavailable() -> HTTPException:
@@ -26,6 +26,7 @@ def _authentication_unavailable() -> HTTPException:
 
 
 async def get_current_user(
+    request: Request,
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(bearer_scheme),
 ) -> User:
     """Validate a Supabase-issued user token before serving the laboratory API."""
@@ -85,9 +86,11 @@ async def get_current_user(
 
     # app_metadata is server-controlled in Supabase; user_metadata must never set roles.
     app_metadata = payload.get("app_metadata") or {}
-    role = app_metadata.get("lab_role", "researcher")
-    if role not in {"researcher", "reviewer", "administrator"}:
-        role = "researcher"
+    role = app_metadata.get("lab_role", "viewer")
+    if role not in {"viewer", "researcher", "reviewer", "administrator"}:
+        role = "viewer"
+    if role == "viewer" and request.method not in {"GET", "HEAD", "OPTIONS"}:
+        raise HTTPException(status_code=403, detail="Your account has read-only access. Ask the laboratory administrator to assign an editing role.")
 
     return User(id=user_id, email=payload.get("email"), role=role)
 

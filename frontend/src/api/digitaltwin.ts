@@ -3,11 +3,13 @@ import { apiFetch } from "../lib/apiClient";
 import type {
   CalibrationProfile,
   IrrigationEvent,
+  IrrigationScheduleTask,
   OptimizationRun,
   Parcel,
   ParcelDetail,
   Recommendation,
   SensorReadingFull,
+  SensorDevice,
   SimulationRun,
   WeatherForecast,
 } from "./types";
@@ -126,6 +128,42 @@ export function useReadings(id?: number | null, limit = 90) {
         `/api/twin/parcels/${id}/readings?limit=${limit}`,
       ),
     enabled: Boolean(id),
+  });
+}
+
+export function useSensorDevices(parcelId?: number | null) {
+  return useQuery<SensorDevice[]>({
+    queryKey: ["twin", "sensors", parcelId],
+    queryFn: () => apiFetch<SensorDevice[]>(`/api/twin/parcels/${parcelId}/sensors`),
+    enabled: Boolean(parcelId),
+  });
+}
+
+/**
+ * Register a field device and return its one-time gateway credential. The
+ * plaintext token is intentionally not retrievable after this response.
+ */
+export interface SensorDeviceCreate {
+  code: string;
+  name: string;
+  sensor_type?: string;
+  metadata?: Record<string, unknown>;
+}
+
+export interface ProvisionedSensorDevice extends SensorDevice {
+  gateway_token: string;
+}
+
+export function useProvisionSensorDevice() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ parcelId, body }: { parcelId: number; body: SensorDeviceCreate }) =>
+      apiFetch<ProvisionedSensorDevice>(`/api/twin/parcels/${parcelId}/sensors`, {
+        method: "POST",
+        body: JSON.stringify(body),
+      }),
+    onSuccess: (_data, { parcelId }) =>
+      qc.invalidateQueries({ queryKey: ["twin", "sensors", parcelId] }),
   });
 }
 
@@ -449,15 +487,60 @@ export function useOptimisationRuns(parcelId?: number | null) {
   });
 }
 
+export interface OptimisationParams {
+  run_name?: string;
+  horizon_days?: number;
+  max_irrigation_mm_per_day?: number;
+  water_quota_mm?: number | null;
+  rainfall_factor?: number;
+  et_factor?: number;
+  temperature_delta_c?: number;
+  trigger_depletion_fraction?: number;
+  refill_depletion_fraction?: number;
+}
+
 export function useRunOptimisation() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (parcelId: number) =>
+    mutationFn: ({ parcelId, params }: { parcelId: number; params?: OptimisationParams }) =>
       apiFetch(`/api/optimisation/parcels/${parcelId}/runs`, {
         method: "POST",
-        body: JSON.stringify({}),
+        body: JSON.stringify(params ?? {}),
       }),
-    onSuccess: (_data, parcelId) =>
+    onSuccess: (_data, { parcelId }) =>
       qc.invalidateQueries({ queryKey: ["optimisation", "runs", parcelId] }),
+  });
+}
+
+export function useFieldTasks(status = "open") {
+  return useQuery<IrrigationScheduleTask[]>({
+    queryKey: ["optimisation", "field-tasks", status],
+    queryFn: () => apiFetch<IrrigationScheduleTask[]>(`/api/optimisation/field-tasks?status=${status}`),
+  });
+}
+
+export function useApproveOptimisationRun() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (runId: number) => apiFetch<IrrigationScheduleTask[]>(`/api/optimisation/runs/${runId}/approve`, { method: "POST" }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["optimisation", "runs"] });
+      qc.invalidateQueries({ queryKey: ["optimisation", "field-tasks"] });
+    },
+  });
+}
+
+export function useCompleteFieldTask() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ taskId, actual_amount_mm, occurred_at, notes }: {
+      taskId: number; actual_amount_mm: number; occurred_at: string; notes?: string;
+    }) => apiFetch<IrrigationScheduleTask>(`/api/optimisation/field-tasks/${taskId}/complete`, {
+      method: "POST", body: JSON.stringify({ actual_amount_mm, occurred_at, notes }),
+    }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["optimisation", "field-tasks"] });
+      qc.invalidateQueries({ queryKey: ["twin", "irrigation"] });
+    },
   });
 }

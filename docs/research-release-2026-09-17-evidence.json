@@ -1,0 +1,27 @@
+{
+  "checked_at": "2026-09-17T08:03:00.070079+00:00",
+  "offline_regression": {
+    "tests": 30,
+    "status": "passed",
+    "seconds": 19.685
+  },
+  "typescript": "passed",
+  "browser": [
+    "saved proposed finding",
+    "submitted revision 6; revision 5 remained approved",
+    "pending submission visible on attention dashboard",
+    "synthetic model MAE/RMSE 1; baseline MAE/RMSE 3 displayed",
+    "delivery summary and consumer receipts displayed"
+  ],
+  "integration_walkthrough": "synthetic API submit/request changes/revise/approve passed",
+  "sqlite_backup_restore": "passed offline test",
+  "docker_package": "not executed: Docker unavailable",
+  "postgresql_restore": "not executed",
+  "real_broker_outage": "not executed",
+  "field_validation": "not performed: no laboratory measurements",
+  "export_print_layout": "not verified; prior browser file-URL policy blocks local report rendering",
+  "production_frontend_build": {
+    "status": "passed",
+    "warning": "Existing large JavaScript bundle advisory"
+  }
+}

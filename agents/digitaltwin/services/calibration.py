@@ -15,7 +15,9 @@ from agents.digitaltwin.models import (
     SensorReading,
 )
 
-FIELD_DATA_ORIGINS = {"field", "field_import"}
+from agents.digitaltwin.services.eligibility import FIELD_ORIGINS, is_reviewed_field_reading
+
+FIELD_DATA_ORIGINS = FIELD_ORIGINS
 CROP_COEFFICIENT_MULTIPLIERS = tuple(round(0.60 + step * 0.05, 2) for step in range(17))
 FIELD_CAPACITY_MULTIPLIERS = (0.85, 0.90, 0.95, 1.00, 1.05, 1.10, 1.15)
 
@@ -43,7 +45,7 @@ async def create_calibration_candidate(
     field_readings = [
         row
         for row in all_readings
-        if row.quality_flag == "ok" and row.data_origin in FIELD_DATA_ORIGINS
+        if is_reviewed_field_reading(row)
     ]
     if start_date:
         field_readings = [row for row in field_readings if row.recorded_at.date() >= start_date]
@@ -122,6 +124,7 @@ async def create_calibration_candidate(
         "accepted_data_origins": sorted(FIELD_DATA_ORIGINS),
         "weather_inputs": "rainfall_mm and evapotranspiration_mm attached to field readings",
         "status": "review_required",
+        "evaluation_method": "in-sample fit; independent field validation not performed",
     }
     parameters = {
         "crop_coefficient": round(best["crop_coefficient"], 3),
@@ -211,7 +214,8 @@ def _evaluate_candidate(
         "mae_mm": round(mae, 2),
         "rmse_mm": round(rmse, 2),
         "bias_mm": round(bias, 2),
-        "validation_observations": len(errors),
+        "validation_observations": len(errors),  # Legacy response compatibility.
+        "fit_observations": len(errors),
     }
 
 

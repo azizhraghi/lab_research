@@ -12,6 +12,13 @@ export interface ArticleSummary {
   generated_at: string;
 }
 
+export interface ArticleUserState {
+  is_saved: boolean;
+  read_at?: string | null;
+  shared_at?: string | null;
+  share_note?: string | null;
+}
+
 export interface Article {
   id: number;
   source_id: number;
@@ -24,6 +31,44 @@ export interface Article {
   collected_at: string;
   tags: ArticleTag[];
   summaries: ArticleSummary[];
+  state: ArticleUserState;
+}
+
+export interface WatchSubscription {
+  id: number;
+  user_id: string;
+  keywords: string[];
+  themes: string[];
+  frequency: "daily" | "weekly";
+  active: boolean;
+  delivery_channel: "in_app";
+  last_digest_at?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface WatchDigest {
+  id: number;
+  rule_id: number;
+  user_id: string;
+  frequency: string;
+  period_start: string;
+  period_end: string;
+  item_count: number;
+  created_at: string;
+  items: Array<{ article: Article }>;
+}
+
+export interface CollectionRun {
+  id: number;
+  trigger: string;
+  status: "running" | "completed" | "completed_with_warnings" | "failed";
+  started_at: string;
+  completed_at?: string | null;
+  source_count: number;
+  articles_collected: number;
+  digests_created: number;
+  error_message?: string | null;
 }
 
 export interface Source {
@@ -51,6 +96,16 @@ export interface Parcel {
   created_at: string;
 }
 
+export type SensorReadingQualityFlag = "pending" | "ok" | "suspect" | "error";
+
+export type SensorReadingReviewStatus =
+  | "pending_validation"
+  | "not_required"
+  | "pending"
+  | "accepted"
+  | "rejected"
+  | "corrected";
+
 export interface SensorReading {
   id: number;
   recorded_at: string;
@@ -58,7 +113,14 @@ export interface SensorReading {
   rainfall_mm: number;
   evapotranspiration_mm: number;
   temperature_c?: number | null;
-  quality_flag: string;
+  quality_flag: SensorReadingQualityFlag;
+  quality_issues: string[];
+  review_status: SensorReadingReviewStatus;
+  reviewed_by?: string | null;
+  reviewed_at?: string | null;
+  review_notes?: string | null;
+  corrected_from_reading_id?: number | null;
+  replacement_reading_id?: number | null;
   data_origin: string;
 }
 
@@ -70,6 +132,38 @@ export interface SensorReading {
 export interface SensorReadingFull extends SensorReading {
   parcel_id: number;
   sensor_code: string;
+}
+
+export interface SensorDevice {
+  id: number;
+  parcel_id: number;
+  code: string;
+  name: string;
+  sensor_type: string;
+  active: boolean;
+  battery_percent?: number | null;
+  last_contact_at?: string | null;
+  last_upload_at?: string | null;
+  consecutive_upload_failures: number;
+  last_error?: string | null;
+  metadata: Record<string, unknown>;
+  created_at: string;
+  rotated_at?: string | null;
+  health: "healthy" | "low_battery" | "offline" | "upload_failed" | "disabled";
+}
+
+export interface MeasurementReview {
+  id: string;
+  reading_id: number;
+  parcel_id: number;
+  status: "pending" | "accepted" | "rejected" | "corrected";
+  quality_flag: SensorReadingQualityFlag;
+  issues: string[];
+  annotation?: string | null;
+  reviewer_id?: string | null;
+  reviewed_at?: string | null;
+  correction?: Record<string, unknown> | null;
+  created_at: string;
 }
 
 /**
@@ -116,6 +210,7 @@ export interface CalibrationMetrics {
   bias_mm: number;
   /** One fewer than observation_count — the first day seeds the balance. */
   validation_observations: number;
+  fit_observations?: number;
 }
 
 export interface CalibrationDataQuality {
@@ -342,6 +437,160 @@ export interface Budget {
   description?: string | null;
 }
 
+export type MilestoneStatus = "pending" | "at_risk" | "completed";
+export type DeliverableStatus = "planned" | "draft" | "submitted" | "approved";
+export type RiskStatus = "open" | "mitigated" | "closed";
+
+export interface ProjectMilestone {
+  id: string;
+  project_id: string;
+  title: string;
+  due_date: string;
+  status: MilestoneStatus;
+  owner_id?: string | null;
+  notes?: string | null;
+  completed_at?: string | null;
+}
+
+export interface ProjectDeliverable {
+  id: string;
+  project_id: string;
+  title: string;
+  deliverable_type: string;
+  due_date?: string | null;
+  status: DeliverableStatus;
+  owner_id?: string | null;
+  url?: string | null;
+  notes?: string | null;
+}
+
+export interface ProjectRisk {
+  id: string;
+  project_id: string;
+  title: string;
+  description?: string | null;
+  likelihood: number;
+  impact: number;
+  status: RiskStatus;
+  owner_id?: string | null;
+  mitigation?: string | null;
+}
+
+export interface BudgetSummary {
+  budget_id: string;
+  project_id: string;
+  currency: string;
+  allocated: number;
+  spent: number;
+  committed: number;
+  available_after_commitments: number;
+}
+
+export interface OperationalAlert {
+  level: "info" | "warning" | "critical";
+  category: "deadline" | "budget" | "risk" | "maintenance" | "workload";
+  message: string;
+  entity_type: string;
+  entity_id: string;
+  project_id?: string | null;
+}
+
+export interface MonthlyProjectReport {
+  project_id: string;
+  project_name: string;
+  month: string;
+  milestone_total: number;
+  milestones_completed: number;
+  deliverable_total: number;
+  deliverables_approved: number;
+  open_risk_count: number;
+  high_risk_count: number;
+  expense_total: number;
+  commitment_total: number;
+  planned_task_count: number;
+  planned_task_hours: number;
+  highlights: string[];
+}
+
+export interface EquipmentReservation {
+  id: string;
+  equipment_id: string;
+  project_id?: string | null;
+  requester_id: string;
+  purpose: string;
+  start_at: string;
+  end_at: string;
+  status: "requested" | "approved" | "cancelled";
+  approved_by?: string | null;
+}
+
+export interface EquipmentMaintenance {
+  id: string;
+  equipment_id: string;
+  maintenance_type: string;
+  due_date: string;
+  status: "scheduled" | "in_progress" | "completed" | "cancelled";
+  notes?: string | null;
+}
+
+export interface Workload {
+  personnel_id: string;
+  personnel_name: string;
+  scheduled_hours: number;
+  unscheduled_assigned_hours: number;
+  task_count: number;
+  capacity_hours: number;
+  overloaded: boolean;
+}
+
+// ── Governed public portal (never exposes the internal MIS/biblio shapes) ──
+export interface PublicResearcher {
+  id: number;
+  name: string;
+  department: string;
+  role: string;
+  visibility: "summary" | "full";
+  public_bio?: string | null;
+}
+
+export interface PublicPublication {
+  id: string;
+  source_publication_id: number;
+  title: string;
+  abstract?: string | null;
+  doi?: string | null;
+  journal?: string | null;
+  year?: number | null;
+  keywords: string[];
+  status: "published";
+  published_at?: string | null;
+}
+
+export interface PublicProject {
+  id: string;
+  project_id: string;
+  title: string;
+  summary: string;
+  research_area?: string | null;
+  status: "published";
+  start_date?: string | null;
+  end_date?: string | null;
+  published_at?: string | null;
+}
+
+export interface PublicDataset {
+  id: string;
+  title: string;
+  description: string;
+  version: string;
+  license: string;
+  access_url?: string | null;
+  citation?: string | null;
+  keywords: string[];
+  status: "published";
+  published_at?: string | null;
+}
+
 // ── Qualité ───────────────────────────────────────────────────────────
 
 export type NiveauQualite = "conforme" | "avertissement" | "non_conforme";
@@ -444,4 +693,24 @@ export interface OptimizationRun {
   summary: Record<string, unknown>;
   schedule: Record<string, unknown>[];
   assumptions: Record<string, unknown>;
+  is_approved: boolean;
+  approved_by?: string | null;
+  approved_at?: string | null;
+}
+
+export interface IrrigationScheduleTask {
+  id: number;
+  optimization_run_id: number;
+  parcel_id: number;
+  scheduled_date: string;
+  planned_amount_mm: number;
+  status: "open" | "completed";
+  assigned_to?: string | null;
+  approved_by: string;
+  completed_by?: string | null;
+  completed_at?: string | null;
+  actual_amount_mm?: number | null;
+  notes?: string | null;
+  irrigation_event_id?: number | null;
+  created_at: string;
 }

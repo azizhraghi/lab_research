@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from shared.base_agent import BaseAgent
 from shared.schemas import ActionResult, AgentAction, Event
 from agents.digitaltwin.models import Parcel, SensorReading
+from agents.digitaltwin.services.eligibility import operational_readings
 from agents.digitaltwin.services.forecast import (
     get_active_crop_coefficient,
     get_current_forecast_coverage,
@@ -50,15 +51,7 @@ class SimulationAgent(BaseAgent):
         if not parcel:
             raise ValueError(f"Parcel {parcel_id} not found")
 
-        stmt = (
-            select(SensorReading)
-            .where(SensorReading.parcel_id == parcel_id)
-            .order_by(SensorReading.recorded_at.asc())
-        )
-        result = await db.execute(stmt)
-        readings = result.scalars().all()
-        if not readings:
-            raise ValueError(f"No sensor/weather readings found for parcel {parcel_id}")
+        readings = await operational_readings(db, parcel)
 
         latest_reading = readings[-1]
         start_date = max(
@@ -90,6 +83,7 @@ class SimulationAgent(BaseAgent):
             ),
         )
         projection["assumptions"].update({
+            "source_reading_id": latest_reading.id,
             "forecast_coverage_start": forecast.start_date.isoformat(),
             "forecast_coverage_end": forecast.end_date.isoformat(),
             **calibration_metadata,

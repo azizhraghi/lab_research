@@ -1,20 +1,28 @@
 from datetime import date, datetime
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class ParcelCreate(BaseModel):
     project_id: Optional[str] = None
-    name: str
-    code: str
+    name: str = Field(min_length=1, max_length=200)
+    code: str = Field(min_length=1, max_length=80)
     crop_type: str = "wheat"
-    area_ha: float
-    latitude: float
-    longitude: float
+    area_ha: float = Field(gt=0, allow_inf_nan=False)
+    latitude: float = Field(ge=-90, le=90, allow_inf_nan=False)
+    longitude: float = Field(ge=-180, le=180, allow_inf_nan=False)
     soil_type: str = "clay loam"
-    field_capacity_mm: float = 120.0
-    wilting_point_mm: float = 45.0
+    field_capacity_mm: float = Field(120.0, gt=0, allow_inf_nan=False)
+    wilting_point_mm: float = Field(45.0, ge=0, allow_inf_nan=False)
+
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+    @model_validator(mode="after")
+    def valid_water_range(self):
+        if self.wilting_point_mm >= self.field_capacity_mm:
+            raise ValueError("Field capacity must exceed the wilting point.")
+        return self
 
 
 class SensorReadingInline(BaseModel):
@@ -25,6 +33,11 @@ class SensorReadingInline(BaseModel):
     evapotranspiration_mm: float
     temperature_c: Optional[float] = None
     quality_flag: str = "ok"
+    quality_issues: List[str] = []
+    review_status: str = "not_required"
+    reviewed_by: Optional[str] = None
+    reviewed_at: Optional[datetime] = None
+    review_notes: Optional[str] = None
     data_origin: str = "unknown"
 
     model_config = ConfigDict(from_attributes=True)
@@ -82,6 +95,44 @@ class SensorReadingResponse(SensorReadingInline):
     sensor_code: str
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class SensorDeviceCreate(BaseModel):
+    code: str = Field(min_length=3, max_length=80, pattern=r"^[A-Za-z0-9._-]+$")
+    name: str = Field(min_length=2, max_length=120)
+    sensor_type: str = Field(default="soil_moisture", min_length=2, max_length=80)
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
+class SensorDeviceResponse(BaseModel):
+    id: int
+    parcel_id: int
+    code: str
+    name: str
+    sensor_type: str
+    active: bool
+    battery_percent: Optional[float] = None
+    last_contact_at: Optional[datetime] = None
+    last_upload_at: Optional[datetime] = None
+    consecutive_upload_failures: int
+    last_error: Optional[str] = None
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime
+    rotated_at: Optional[datetime] = None
+    health: str
+
+
+class SensorDeviceProvisionedResponse(SensorDeviceResponse):
+    gateway_token: str
+
+
+class GatewayReadingPayload(BaseModel):
+    recorded_at: datetime
+    soil_moisture_mm: float = Field(ge=0.0)
+    rainfall_mm: float = Field(0.0, ge=0.0)
+    evapotranspiration_mm: float = Field(0.0, ge=0.0)
+    temperature_c: Optional[float] = None
+    battery_percent: Optional[float] = Field(None, ge=0.0, le=100.0)
 
 
 class WeatherForecastResponse(BaseModel):

@@ -6,6 +6,7 @@ Added: KafkaEventBus, InMemoryEventBus, and factory from Friend 2.
 """
 import json
 import asyncio
+import logging
 from abc import ABC, abstractmethod
 from collections import defaultdict
 from typing import Callable, Any, Awaitable, Optional
@@ -14,6 +15,8 @@ import redis.asyncio as redis
 
 from shared.config import settings
 from shared.schemas import Event
+
+logger = logging.getLogger("lrste.event_bus")
 
 EventHandler = Callable[[Event], Awaitable[None]]
 
@@ -29,6 +32,11 @@ class EventBusBase(ABC):
 
     @abstractmethod
     async def subscribe(self, stream: str, handler: EventHandler) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
+    async def check_health(self) -> dict[str, Any]:
+        """Verify the configured transport is reachable for readiness probes."""
         raise NotImplementedError
 
 
@@ -58,6 +66,10 @@ class RedisStreamsEventBus(EventBusBase):
         payload = {"data": json.dumps(event_dict)}
         return await self.redis_client.xadd(stream_name, payload)
 
+    async def check_health(self) -> dict[str, Any]:
+        await self.redis_client.ping()
+        return {"transport": "redis", "durable": True}
+
     async def subscribe(self, stream_name: str, group_name: str = None,
                         consumer_name: str = None,
                         callback: EventHandler = None,
@@ -82,13 +94,23 @@ class RedisStreamsEventBus(EventBusBase):
 
         while True:
             try:
+                # First retry this consumer's unacknowledged delivery. Only
+                # then wait for new messages. A raised agent handler is thus
+                # retried rather than silently skipped by the ">" cursor.
                 messages = await self.redis_client.xreadgroup(
                     groupname=_group,
                     consumername=_consumer,
-                    streams={stream_name: ">"},
+                    streams={stream_name: "0"},
                     count=1,
-                    block=5000,
                 )
+                if not messages:
+                    messages = await self.redis_client.xreadgroup(
+                        groupname=_group,
+                        consumername=_consumer,
+                        streams={stream_name: ">"},
+                        count=1,
+                        block=5000,
+                    )
 
                 for stream, msgs in messages:
                     for message_id, message_data in msgs:
@@ -103,7 +125,8 @@ class RedisStreamsEventBus(EventBusBase):
             except Exception as e:
                 # Consumer loop: log and keep polling rather than dying — but
                 # say it loudly; a silent consumer is a lost agent.
-                print(f"[EventBus] Redis consumer error on {stream_name}: {e}")
+                logger.exception("redis_consumer_error", extra={"stream": stream_name})
+                await asyncio.sleep(1)
 
 
 # ── InMemory (from Friend 2, useful for testing) ──────────────────────
@@ -159,11 +182,14 @@ class InMemoryEventBus(EventBusBase):
                 for handler in self._subscribers.get(stream, []):
                     try:
                         await handler(event)
-                    except Exception as e:
-                        print(
-                            f"[EventBus] Handler for '{event.type}' raised: "
-                            f"{type(e).__name__}: {e}"
-                        )
+                    except Exception:
+                        # Development transport has no durable pending-entry
+                        # list. Requeue the event; agent receipts make already
+                        # successful consumers skip their duplicate delivery.
+                        logger.exception("memory_consumer_error", extra={"event_type": event.type})
+                        await asyncio.sleep(1)
+                        self._queue.put_nowait((stream, event))
+                        break
             finally:
                 self._queue.task_done()
 
@@ -174,6 +200,9 @@ class InMemoryEventBus(EventBusBase):
         self._ensure_worker()
         self._queue.put_nowait((stream, event))
         return event.id
+
+    async def check_health(self) -> dict[str, Any]:
+        return {"transport": "memory", "durable": False}
 
     async def subscribe(self, stream: str, handler: EventHandler, **kwargs) -> None:
         self._subscribers[stream].append(handler)
@@ -202,13 +231,17 @@ class KafkaEventBus(EventBusBase):
         await producer.send_and_wait(stream, message)
         return event.id
 
-    async def _consume(self, stream: str, handler: EventHandler) -> None:
+    async def check_health(self) -> dict[str, Any]:
+        await self._get_producer()
+        return {"transport": "kafka", "durable": True}
+
+    async def _consume(self, stream: str, handler: EventHandler, group_name: str) -> None:
         from aiokafka import AIOKafkaConsumer
         consumer = AIOKafkaConsumer(
             stream,
             bootstrap_servers=self._bootstrap_servers,
             auto_offset_reset="latest",
-            group_id=f"{stream}-group",
+            group_id=group_name,
         )
         await consumer.start()
         try:
@@ -218,8 +251,8 @@ class KafkaEventBus(EventBusBase):
         finally:
             await consumer.stop()
 
-    async def subscribe(self, stream: str, handler: EventHandler, **kwargs) -> None:
-        task = asyncio.create_task(self._consume(stream, handler))
+    async def subscribe(self, stream: str, handler: EventHandler, group_name: str = None, **kwargs) -> None:
+        task = asyncio.create_task(self._consume(stream, handler, group_name or f"{stream}-group"))
         self._tasks.append(task)
 
 

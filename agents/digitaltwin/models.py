@@ -65,12 +65,40 @@ class SensorReading(Base):
     temperature_c = Column(Float, nullable=True)
     sensor_code = Column(String, default="")
     quality_flag = Column(String, default="ok")
+    quality_issues = Column(JSON, nullable=False, default=list)
+    review_status = Column(String, nullable=False, default="not_required", index=True)
+    reviewed_by = Column(String, nullable=True)
+    reviewed_at = Column(DateTime, nullable=True)
+    review_notes = Column(Text, nullable=True)
     data_origin = Column(String, default="unknown", nullable=False)
 
     parcel = relationship("Parcel", back_populates="sensor_readings")
 
     def __repr__(self):
         return f"<SensorReading parcel={self.parcel_id} at={self.recorded_at}>"
+
+
+class SensorDevice(Base):
+    """Registered field gateway or sensor; its plaintext key is never stored."""
+    __tablename__ = "twin_sensor_devices"
+
+    id = Column(Integer, primary_key=True, index=True)
+    parcel_id = Column(Integer, ForeignKey("twin_parcels.id"), index=True, nullable=False)
+    code = Column(String, unique=True, index=True, nullable=False)
+    name = Column(String, nullable=False)
+    sensor_type = Column(String, nullable=False, default="soil_moisture")
+    token_hash = Column(String, unique=True, nullable=False)
+    active = Column(Boolean, nullable=False, default=True)
+    battery_percent = Column(Float, nullable=True)
+    last_contact_at = Column(DateTime, nullable=True, index=True)
+    last_upload_at = Column(DateTime, nullable=True)
+    consecutive_upload_failures = Column(Integer, nullable=False, default=0)
+    last_error = Column(String, nullable=True)
+    metadata_json = Column(JSON, nullable=False, default=dict)
+    created_at = Column(DateTime, default=datetime.datetime.utcnow, nullable=False)
+    rotated_at = Column(DateTime, nullable=True)
+
+    parcel = relationship("Parcel")
 
 
 class WeatherForecast(Base):
@@ -163,6 +191,28 @@ class IrrigationRecommendation(Base):
 
     def __repr__(self):
         return f"<Recommendation parcel={self.parcel_id} irrigation={self.recommended_irrigation_mm}mm>"
+
+
+class IrrigationScheduleTask(Base):
+    """A reviewer-approved schedule row made actionable for field staff."""
+    __tablename__ = "twin_irrigation_schedule_tasks"
+
+    id = Column(Integer, primary_key=True, index=True)
+    optimization_run_id = Column(Integer, ForeignKey("optimisation_runs.id"), index=True, nullable=False)
+    parcel_id = Column(Integer, ForeignKey("twin_parcels.id"), index=True, nullable=False)
+    scheduled_date = Column(Date, nullable=False, index=True)
+    planned_amount_mm = Column(Float, nullable=False)
+    status = Column(String, nullable=False, default="open", index=True)
+    assigned_to = Column(String, nullable=True)
+    approved_by = Column(String, nullable=False)
+    completed_by = Column(String, nullable=True)
+    completed_at = Column(DateTime, nullable=True)
+    actual_amount_mm = Column(Float, nullable=True)
+    notes = Column(Text, nullable=True)
+    irrigation_event_id = Column(Integer, nullable=True, index=True)
+    created_at = Column(DateTime, default=datetime.datetime.utcnow, nullable=False)
+
+    parcel = relationship("Parcel")
 
 
 class SimulationScenario(Base):

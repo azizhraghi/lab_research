@@ -76,5 +76,4 @@ async def fetch_rss_feed(url: str) -> List[Dict[str, Any]]:
 
             return items
         except Exception as e:
-            print(f"Error fetching RSS {url}: {e}")
-            return []
+            raise RuntimeError(f"RSS/Atom fetch or parsing failed: {e}") from e

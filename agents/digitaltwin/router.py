@@ -1,5 +1,6 @@
 import csv
 import io
+from datetime import datetime, timedelta
 from typing import List
 from uuid import uuid4
 
@@ -8,6 +9,9 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from shared.database import get_db
+from shared.config import settings
+from shared.gateway_security import hash_gateway_token, issue_gateway_token
+from shared.outbox import enqueue_event, outbox_dispatcher
 from shared.security import User, require_roles
 from shared.schemas import Event
 from agents.digitaltwin.models import (
@@ -16,6 +20,7 @@ from agents.digitaltwin.models import (
     IrrigationRecommendation,
     Parcel,
     SensorReading,
+    SensorDevice,
     SimulationScenario,
     WeatherForecast,
 )
@@ -37,6 +42,9 @@ from agents.digitaltwin.schemas import (
     SensorReadingInline,
     SensorReadingImportResponse,
     SensorReadingResponse,
+    SensorDeviceCreate,
+    SensorDeviceProvisionedResponse,
+    SensorDeviceResponse,
     SimulationRequest,
     SimulationResponse,
     WeatherForecastResponse,
@@ -51,6 +59,56 @@ from agents.digitaltwin.services.forecast import (
 )
 
 router = APIRouter()
+
+
+@router.get('/parcels/{parcel_id}/evidence-trail')
+async def parcel_evidence_trail(parcel_id: int, db: AsyncSession = Depends(get_db)):
+    from agents.digitaltwin.services.eligibility import operational_readings, is_reviewed_field_reading
+    parcel = await db.get(Parcel, parcel_id)
+    if parcel is None:
+        raise HTTPException(404, 'Parcel not found')
+    try:
+        await operational_readings(db, parcel)
+        eligibility = dict(eligible=True, reason='The latest measurement passes operational eligibility checks.')
+    except ValueError as exc:
+        eligibility = dict(eligible=False, reason=str(exc))
+    readings = list(await db.scalars(select(SensorReading).where(SensorReading.parcel_id == parcel_id)
+        .order_by(SensorReading.recorded_at.desc(), SensorReading.id.desc()).limit(100)))
+    recommendations = list(await db.scalars(select(IrrigationRecommendation).where(IrrigationRecommendation.parcel_id == parcel_id)
+        .order_by(IrrigationRecommendation.generated_at.desc(), IrrigationRecommendation.id.desc()).limit(100)))
+    applications = list(await db.scalars(select(IrrigationEvent).where(IrrigationEvent.parcel_id == parcel_id)
+        .order_by(IrrigationEvent.occurred_at.desc(), IrrigationEvent.id.desc()).limit(100)))
+    return dict(parcel_id=parcel_id, project_id=parcel.project_id, eligibility=eligibility, limit_per_category=100,
+        readings=[dict(id=r.id,recorded_at=r.recorded_at,moisture_mm=r.soil_moisture_mm,origin=r.data_origin,
+            quality=r.quality_flag,review=r.review_status,reviewed_field=is_reviewed_field_reading(r)) for r in readings],
+        recommendations=[dict(id=r.id,source_reading_id=r.source_reading_id,generated_at=r.generated_at,
+            amount_mm=r.recommended_irrigation_mm,approved=r.is_validated,reviewer=r.validated_by) for r in recommendations],
+        applications=[dict(id=r.id,recommendation_id=r.recommendation_id,occurred_at=r.occurred_at,
+            amount_mm=r.amount_mm,source=r.source,recorded_by=r.recorded_by) for r in applications])
+
+
+def _sensor_response(device: SensorDevice) -> dict:
+    """Return device health without exposing a credential hash."""
+    stale_at = datetime.utcnow() - timedelta(hours=settings.SENSOR_STALE_AFTER_HOURS)
+    if not device.active:
+        health = "disabled"
+    elif device.consecutive_upload_failures:
+        health = "upload_failed"
+    elif device.last_contact_at is None or device.last_contact_at < stale_at:
+        health = "offline"
+    elif device.battery_percent is not None and device.battery_percent < 20:
+        health = "low_battery"
+    else:
+        health = "healthy"
+    return {
+        "id": device.id, "parcel_id": device.parcel_id, "code": device.code,
+        "name": device.name, "sensor_type": device.sensor_type, "active": device.active,
+        "battery_percent": device.battery_percent, "last_contact_at": device.last_contact_at,
+        "last_upload_at": device.last_upload_at,
+        "consecutive_upload_failures": device.consecutive_upload_failures,
+        "last_error": device.last_error, "metadata": device.metadata_json or {},
+        "created_at": device.created_at, "rotated_at": device.rotated_at, "health": health,
+    }
 
 
 @router.get("/parcels", response_model=List[ParcelResponse])
@@ -236,6 +294,43 @@ async def list_readings(
     return result.scalars().all()
 
 
+@router.get("/parcels/{parcel_id}/sensors", response_model=List[SensorDeviceResponse])
+async def list_sensor_devices(parcel_id: int, db: AsyncSession = Depends(get_db)):
+    if not await db.get(Parcel, parcel_id):
+        raise HTTPException(status_code=404, detail="Parcel not found")
+    devices = (await db.execute(
+        select(SensorDevice).where(SensorDevice.parcel_id == parcel_id).order_by(SensorDevice.name)
+    )).scalars().all()
+    return [_sensor_response(device) for device in devices]
+
+
+@router.post(
+    "/parcels/{parcel_id}/sensors",
+    response_model=SensorDeviceProvisionedResponse,
+    dependencies=[Depends(require_roles("administrator"))],
+)
+async def provision_sensor_device(
+    parcel_id: int,
+    data: SensorDeviceCreate,
+    db: AsyncSession = Depends(get_db),
+):
+    """Register a device and reveal its gateway token exactly once."""
+    if not await db.get(Parcel, parcel_id):
+        raise HTTPException(status_code=404, detail="Parcel not found")
+    existing = (await db.execute(select(SensorDevice).where(SensorDevice.code == data.code))).scalar_one_or_none()
+    if existing:
+        raise HTTPException(status_code=409, detail="Sensor code is already registered")
+    token = issue_gateway_token()
+    device = SensorDevice(
+        parcel_id=parcel_id, code=data.code, name=data.name, sensor_type=data.sensor_type,
+        token_hash=hash_gateway_token(token), metadata_json=data.metadata,
+    )
+    db.add(device)
+    await db.commit()
+    await db.refresh(device)
+    return {**_sensor_response(device), "gateway_token": token}
+
+
 @router.post(
     "/parcels/{parcel_id}/readings",
     response_model=SensorReadingResponse,
@@ -253,11 +348,9 @@ async def add_reading(
     from agents.digitaltwin.agent import digital_twin_agent
 
     reading = await digital_twin_agent.ingest_reading(db, parcel_id, data.model_dump())
-    await db.commit()
-    await db.refresh(reading)
-    # The commit comes first: downstream agents use independent sessions and
-    # must never inspect an uncommitted field measurement.
-    await digital_twin_agent.emit_event("events", Event(
+    # The measurement and its quality-validation request are one transaction:
+    # a successful API response can never leave a reading invisible to agents.
+    await enqueue_event(db, "events", Event(
         id=str(uuid4()),
         type="twin.reading_recorded",
         source_agent="digital_twin",
@@ -267,6 +360,9 @@ async def add_reading(
             "reading": SensorReadingResponse.model_validate(reading).model_dump(mode="json"),
         },
     ))
+    await db.commit()
+    await db.refresh(reading)
+    outbox_dispatcher.notify()
     return reading
 
 
@@ -333,6 +429,7 @@ async def import_field_readings(
     db: AsyncSession = Depends(get_db),
 ):
     """Import daily root-zone field readings from a validated CSV file."""
+    from agents.digitaltwin.agent import digital_twin_agent
     parcel = await db.get(Parcel, parcel_id)
     if not parcel:
         raise HTTPException(status_code=404, detail="Parcel not found")
@@ -387,45 +484,36 @@ async def import_field_readings(
             )
             reading = existing_result.scalar_one_or_none()
             if reading:
+                linked = await db.scalar(select(IrrigationRecommendation.id).where(
+                    IrrigationRecommendation.source_reading_id == reading.id))
+                if linked is not None or reading.review_status != "pending_validation":
+                    raise ValueError("This measurement has already been processed. Add a new observation or use the measurement review workflow.")
                 reading.soil_moisture_mm = data.soil_moisture_mm
                 reading.rainfall_mm = data.rainfall_mm
                 reading.evapotranspiration_mm = data.evapotranspiration_mm
                 reading.temperature_c = data.temperature_c
-                reading.quality_flag = data.quality_flag
+                reading.quality_flag = "pending"
+                reading.review_status = "pending_validation"
                 reading.data_origin = "field_import"
                 updated += 1
             else:
-                db.add(SensorReading(parcel_id=parcel_id, **data.model_dump()))
+                reading = await digital_twin_agent.ingest_reading(db, parcel_id, data.model_dump())
                 created += 1
+            await db.flush()
+            await enqueue_event(db, "events", Event(
+                id=str(uuid4()), type="twin.reading_recorded", source_agent="digital_twin",
+                payload={"parcel_id": parcel_id, "reading_id": reading.id,
+                         "reading": SensorReadingResponse.model_validate(reading).model_dump(mode="json")},
+            ))
         except Exception as exc:
             rejected += 1
             if len(errors) < 20:
                 errors.append(f"Row {line_number}: {exc}")
 
     if created or updated:
+        # Each imported measurement is validated; only the newest can drive advice.
         await db.commit()
-        # A bulk import may contain historical records. Only the newest accepted
-        # reading is eligible to drive the current irrigation decision.
-        latest_result = await db.execute(
-            select(SensorReading)
-            .where(SensorReading.parcel_id == parcel_id)
-            .order_by(SensorReading.recorded_at.desc())
-            .limit(1)
-        )
-        latest = latest_result.scalar_one_or_none()
-        if latest:
-            from agents.digitaltwin.agent import digital_twin_agent
-
-            await digital_twin_agent.emit_event("events", Event(
-                id=str(uuid4()),
-                type="twin.reading_recorded",
-                source_agent="digital_twin",
-                payload={
-                    "parcel_id": parcel_id,
-                    "reading_id": latest.id,
-                    "reading": SensorReadingResponse.model_validate(latest).model_dump(mode="json"),
-                },
-            ))
+        outbox_dispatcher.notify()
     else:
         await db.rollback()
 
@@ -483,12 +571,9 @@ async def record_irrigation_event(
 
     event = IrrigationEvent(parcel_id=parcel_id, **data.model_dump())
     db.add(event)
-    await db.commit()
-    await db.refresh(event)
+    await db.flush()
     if event.recommendation_id is not None:
-        from agents.digitaltwin.agent import digital_twin_agent
-
-        await digital_twin_agent.emit_event("events", Event(
+        await enqueue_event(db, "events", Event(
             id=str(uuid4()),
             type="irrigation.applied",
             source_agent="digital_twin",
@@ -499,6 +584,9 @@ async def record_irrigation_event(
                 "amount_mm": event.amount_mm,
             },
         ))
+    await db.commit()
+    await db.refresh(event)
+    outbox_dispatcher.notify()
     return event
 
 
@@ -589,10 +677,8 @@ async def generate_recommendation(
         from agents.digitaltwin.agent import digital_twin_agent
 
         recommendation = await digital_twin_agent.generate_recommendation(db, parcel_id)
-        await db.commit()
-        await db.refresh(recommendation)
         parcel = await db.get(Parcel, parcel_id)
-        await digital_twin_agent.emit_event("events", Event(
+        await enqueue_event(db, "events", Event(
             id=str(uuid4()),
             type="twin.recommendation_generated",
             source_agent="digital_twin",
@@ -606,6 +692,9 @@ async def generate_recommendation(
                 "review_required": True,
             },
         ))
+        await db.commit()
+        await db.refresh(recommendation)
+        outbox_dispatcher.notify()
         return recommendation
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
@@ -644,6 +733,15 @@ async def approve_recommendation(
         raise HTTPException(status_code=404, detail="Irrigation recommendation not found")
     if recommendation.is_validated:
         raise HTTPException(status_code=400, detail="Recommendation has already been approved")
+
+    from agents.digitaltwin.services.eligibility import operational_readings
+    parcel = await db.get(Parcel, recommendation.parcel_id)
+    if not parcel or recommendation.source_reading_id is None:
+        raise HTTPException(status_code=409, detail="Generate new advice from a traceable field measurement.")
+    try:
+        await operational_readings(db, parcel, recommendation.source_reading_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     recommendation.is_validated = True
     recommendation.validated_by = user.email or user.id

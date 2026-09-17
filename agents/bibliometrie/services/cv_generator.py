@@ -3,12 +3,13 @@
 
 From Friend 1's cv_generator.py, placed in the bibliometrie services directory.
 """
+from html import escape
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.units import mm
 from reportlab.lib import colors
 from reportlab.platypus import (
     SimpleDocTemplate, Paragraph, Spacer, Table,
-    TableStyle, HRFlowable
+    TableStyle, HRFlowable, KeepTogether
 )
 from reportlab.lib.styles import ParagraphStyle
 
@@ -30,8 +31,8 @@ def generate_cv(researcher, output_path: str) -> str:
     )
 
     name_style = ParagraphStyle(
-        "name", fontSize=22, textColor=NAVY,
-        fontName="Helvetica-Bold", spaceAfter=4,
+        "name", fontSize=22, leading=27, textColor=NAVY,
+        fontName="Helvetica-Bold", spaceAfter=8,
     )
     label_style = ParagraphStyle(
         "label", fontSize=8.5, textColor=BLUE, fontName="Helvetica-Bold",
@@ -49,7 +50,7 @@ def generate_cv(researcher, output_path: str) -> str:
 
     story = []
 
-    story.append(Paragraph(researcher.name, name_style))
+    story.append(Paragraph(escape(researcher.name), name_style))
     contact_parts = []
     if researcher.email:
         contact_parts.append(researcher.email)
@@ -59,7 +60,7 @@ def generate_cv(researcher, output_path: str) -> str:
         contact_parts.append(f"Scholar ID: {researcher.google_scholar_id}")
 
     if contact_parts:
-        story.append(Paragraph(" | ".join(contact_parts), sub_style))
+        story.append(Paragraph(escape(" | ".join(contact_parts)), sub_style))
 
     story.append(Spacer(1, 4))
     story.append(HRFlowable(width="100%", thickness=1.5, color=BLUE))
@@ -89,10 +90,10 @@ def generate_cv(researcher, output_path: str) -> str:
             Paragraph("Research Topics", label_style),
         ],
         [
-            Paragraph(str(researcher.h_index) if researcher.h_index else "N/A", body_style),
-            Paragraph(str(researcher.citation_count) if researcher.citation_count else "N/A", body_style),
+            Paragraph(str(researcher.h_index) if researcher.h_index is not None else "N/A", body_style),
+            Paragraph(str(researcher.citation_count) if researcher.citation_count is not None else "N/A", body_style),
             Paragraph(str(len(researcher.publications)), body_style),
-            Paragraph(", ".join(researcher.topics) if researcher.topics else "N/A", body_style),
+            Paragraph(escape(", ".join(researcher.topics)) if researcher.topics else "N/A", body_style),
         ]
     ]
     metrics_tbl = Table(metrics_data, colWidths=[35*mm, 45*mm, 35*mm, 55*mm])
@@ -113,12 +114,14 @@ def generate_cv(researcher, output_path: str) -> str:
         story.append(Paragraph("No publications recorded yet.", sub_style))
     else:
         for i, pub in enumerate(researcher.publications, 1):
-            story.append(Paragraph(f"<b>[{i}]</b> {pub.title}", body_style))
-            story.append(Paragraph(
-                f"Source: {pub.source.upper()}  |  Topic: {pub.topic}  |  ID: {pub.id}",
-                sub_style,
-            ))
-            story.append(Spacer(1, 6))
+            story.append(KeepTogether([
+                Paragraph(f"<b>[{i}]</b> {escape(pub.title)}", body_style),
+                Paragraph(
+                    f"Source: {escape(pub.source.upper())}  |  Journal / year: {escape(pub.topic)}  |  ID: {escape(pub.id)}",
+                    sub_style,
+                ),
+                Spacer(1, 6),
+            ]))
 
     story.append(Spacer(1, 6))
     story.append(HRFlowable(width="100%", thickness=0.6, color=colors.HexColor("#CCCCCC")))

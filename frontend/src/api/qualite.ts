@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { apiFetch } from "../lib/apiClient";
-import type { RapportQualite } from "./types";
+import type { MeasurementReview, RapportQualite } from "./types";
 
 /** Mirrors QualiteAgent.get_stats() — see agents/qualite/agent.py. */
 export interface QualiteStatus {
@@ -41,6 +41,30 @@ export function useValiderEntite() {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["qualite", "rapports"] });
       qc.invalidateQueries({ queryKey: ["qualite", "status"] });
+    },
+  });
+}
+
+export function useMeasurementReviews(status = "pending") {
+  return useQuery<MeasurementReview[]>({
+    queryKey: ["qualite", "measurement-reviews", status],
+    queryFn: () => apiFetch<MeasurementReview[]>(`/api/qualite/measurement-reviews?status=${status}`),
+  });
+}
+
+export function useDecideMeasurementReview() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ reviewId, action, annotation, correction }: {
+      reviewId: string; action: "accept" | "reject" | "annotate" | "correct";
+      annotation?: string; correction?: Record<string, unknown>;
+    }) => apiFetch<MeasurementReview>(`/api/qualite/measurement-reviews/${reviewId}`, {
+      method: "PATCH", body: JSON.stringify({ action, annotation, correction }),
+    }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["qualite", "measurement-reviews"] });
+      qc.invalidateQueries({ queryKey: ["twin", "readings"] });
+      qc.invalidateQueries({ queryKey: ["twin", "parcel"] });
     },
   });
 }

@@ -1,0 +1,23 @@
+name: Verify packaged demo
+on: [push, pull_request]
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 scripts/manage_demo.py preflight --report artifacts/preflight.json
+      - run: docker compose -f compose.demo.yml up --build -d --wait --wait-timeout 240
+      - run: python3 scripts/manage_demo.py check --report artifacts/health.json
+      - run: python3 scripts/manage_demo.py fault-check --report artifacts/recovery.json
+      - run: python3 scripts/manage_demo.py backup --file /tmp/lrste-demo.dump
+      - run: python3 scripts/manage_demo.py restore-check --file /tmp/lrste-demo.dump --report artifacts/restore.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: deployment-verification
+          path: artifacts/*.json
+      - if: always()
+        run: docker compose -f compose.demo.yml logs --no-color
+      - if: always()
+        run: docker compose -f compose.demo.yml down

@@ -10,6 +10,7 @@ from sqlalchemy.orm import selectinload
 
 from shared.base_agent import BaseAgent
 from shared.schemas import Event, AgentAction, ActionResult
+from shared.outbox import enqueue_event, outbox_dispatcher
 from agents.digitaltwin.models import (
     Parcel, SensorReading, IrrigationRecommendation, SimulationScenario
 )
@@ -18,6 +19,7 @@ from agents.digitaltwin.services.irrigation import (
 )
 from agents.digitaltwin.services.forecast import get_active_crop_coefficient
 from agents.digitaltwin.services.simulator import run_simulation
+from agents.digitaltwin.services.eligibility import operational_readings
 
 
 class DigitalTwinAgent(BaseAgent):
@@ -48,31 +50,29 @@ class DigitalTwinAgent(BaseAgent):
                     source_reading_id=reading_id,
                     generation_mode="automatic",
                 )
-                await db.commit()
-                await db.refresh(recommendation)
                 parcel = await db.get(Parcel, parcel_id)
+                # Store the downstream review request with the recommendation.
+                # If either insert fails, neither part of the workflow survives.
+                await enqueue_event(db, "events", Event(
+                    id=str(uuid4()),
+                    type="twin.recommendation_generated",
+                    source_agent=self.name,
+                    payload={
+                        "parcel_id": parcel_id,
+                        "reading_id": reading_id,
+                        "recommendation_id": recommendation.id,
+                        "recommended_irrigation_mm": recommendation.recommended_irrigation_mm,
+                        "parcel_name": parcel.name if parcel else None,
+                        "project_id": parcel.project_id if parcel else None,
+                        "generation_mode": recommendation.generation_mode,
+                        "review_required": True,
+                    },
+                ))
+                await db.commit()
         except ValueError as exc:
             print(f"[{self.name}] No automatic recommendation: {exc}")
             return
-        except Exception as exc:
-            print(f"[{self.name}] Automatic recommendation failed: {exc}")
-            return
-
-        await self.emit_event("events", Event(
-            id=str(uuid4()),
-            type="twin.recommendation_generated",
-            source_agent=self.name,
-            payload={
-                "parcel_id": parcel_id,
-                "reading_id": reading_id,
-                "recommendation_id": recommendation.id,
-                "recommended_irrigation_mm": recommendation.recommended_irrigation_mm,
-                "parcel_name": parcel.name if parcel else None,
-                "project_id": parcel.project_id if parcel else None,
-                "generation_mode": recommendation.generation_mode,
-                "review_required": True,
-            },
-        ))
+        outbox_dispatcher.notify()
 
     async def handle_event(self, event: Event) -> Optional[AgentAction]:
         return None
@@ -90,6 +90,8 @@ class DigitalTwinAgent(BaseAgent):
         self, db: AsyncSession, parcel_id: int, reading_data: dict
     ) -> SensorReading:
         """Store a sensor reading for a parcel."""
+        # Client flags never grant eligibility while background validation runs.
+        reading_data.update(quality_flag="pending", review_status="pending_validation")
         reading = SensorReading(parcel_id=parcel_id, **reading_data)
         db.add(reading)
         await db.flush()
@@ -108,21 +110,7 @@ class DigitalTwinAgent(BaseAgent):
         if not parcel:
             raise ValueError(f"Parcel {parcel_id} not found")
 
-        if source_reading_id is not None:
-            latest = await db.get(SensorReading, source_reading_id)
-            if not latest or latest.parcel_id != parcel_id:
-                raise ValueError("The source reading no longer belongs to this parcel")
-        else:
-            stmt = (
-                select(SensorReading)
-                .where(SensorReading.parcel_id == parcel_id)
-                .order_by(SensorReading.recorded_at.desc())
-                .limit(1)
-            )
-            result = await db.execute(stmt)
-            latest = result.scalar_one_or_none()
-        if not latest:
-            raise ValueError(f"No sensor readings for parcel {parcel_id}")
+        latest = (await operational_readings(db, parcel, source_reading_id))[-1]
 
         # A reading is the durable idempotency key. This also means the manual
         # endpoint safely returns an already-generated agent recommendation
@@ -177,17 +165,7 @@ class DigitalTwinAgent(BaseAgent):
         if not parcel:
             raise ValueError(f"Parcel {parcel_id} not found")
 
-        # Get latest reading
-        stmt = (
-            select(SensorReading)
-            .where(SensorReading.parcel_id == parcel_id)
-            .order_by(SensorReading.recorded_at.desc())
-            .limit(1)
-        )
-        result = await db.execute(stmt)
-        latest = result.scalar_one_or_none()
-        if not latest:
-            raise ValueError(f"No sensor readings for parcel {parcel_id}")
+        latest = (await operational_readings(db, parcel))[-1]
 
         # Run the simulation engine
         sim_result = await run_simulation(

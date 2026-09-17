@@ -25,5 +25,4 @@ async def tag_article(title: str, abstract: str) -> list[dict]:
         data = json.loads(response_text)
         return data.get("tags", [])
     except Exception as e:
-        print(f"Error tagging article: {e}")
-        return []
+        raise RuntimeError(f"Article tagging failed: {e}") from e

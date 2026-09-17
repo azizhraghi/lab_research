@@ -71,7 +71,7 @@ def normalise_doi(raw: str) -> Optional[str]:
     "doi:10.1234/abc" depending on the asserting source, and
     biblio_publications.doi is UNIQUE — so every loader normalises the same way.
     """
-    doi = raw.lower()
+    doi = raw.strip().lower()
     for prefix in ("https://doi.org/", "http://doi.org/", "doi:"):
         if doi.startswith(prefix):
             doi = doi[len(prefix):]

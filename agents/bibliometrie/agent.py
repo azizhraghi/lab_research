@@ -56,6 +56,7 @@ class Researcher(BaseModel):
     scopus_id: Optional[str] = None
     h_index: Optional[int] = None
     citation_count: Optional[int] = None
+    metrics_source: Optional[str] = None
     last_updated: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
@@ -215,6 +216,7 @@ class BibliometrieAgent(BaseAgent):
             return False
 
         researcher.h_index = author.get("hIndex", researcher.h_index)
+        researcher.metrics_source = "semantic_scholar"
         researcher.citation_count = author.get("citationCount", researcher.citation_count)
         researcher.last_updated = datetime.now(timezone.utc)
         print(f"[{self.name}] {researcher.name}: h-index={researcher.h_index}, citations={researcher.citation_count} (Semantic Scholar)")
@@ -234,6 +236,7 @@ class BibliometrieAgent(BaseAgent):
             return False
 
         summary_stats = author.get("summary_stats", {})
+        researcher.metrics_source = "openalex"
         researcher.h_index = summary_stats.get("h_index", researcher.h_index)
         researcher.citation_count = author.get("cited_by_count", researcher.citation_count)
         researcher.last_updated = datetime.now(timezone.utc)
@@ -262,6 +265,7 @@ class BibliometrieAgent(BaseAgent):
             print(f"[{self.name}] Scopus lookup found nothing for {researcher.name}")
             return False
         researcher.h_index = result.get("h_index", researcher.h_index)
+        researcher.metrics_source = "scopus"
         researcher.citation_count = result.get("citation_count", researcher.citation_count)
         if result.get("scopus_id") and not getattr(researcher, "scopus_id", None):
             # The name search may have resolved a Scopus ID we didn't have.
@@ -304,6 +308,7 @@ class BibliometrieAgent(BaseAgent):
                 return researcher
 
             author = scholarly.fill(author)
+            researcher.metrics_source = "scholar"
             researcher.h_index = author.get("hindex", None)
             researcher.citation_count = author.get("citedby", None)
             researcher.google_scholar_id = author.get("scholar_id", researcher.google_scholar_id)
@@ -344,13 +349,7 @@ class BibliometrieAgent(BaseAgent):
         )
         before = (profile.h_index, profile.citation_count)
         updated = self.fetch_scholar_metrics(profile)
-        # Detect which tier actually populated the metrics, for provenance.
-        if updated.google_scholar_id and updated.google_scholar_id == getattr(profile, "google_scholar_id", None):
-            source = "scholar"
-        elif updated.scopus_id:
-            source = "scopus"
-        else:
-            source = "semantic_scholar_or_openalex"
+        source = updated.metrics_source or "unknown"
 
         # Upsert the two indicators the platform actually computes
         # (agents/bibliometrie/services/indicators.py): h_index, total_citations.
@@ -372,9 +371,11 @@ class BibliometrieAgent(BaseAgent):
                     researcher_id=researcher_id,
                     metric_name=metric_name,
                     value=float(value),
+                    source=source,
                 ))
             else:
                 row.value = float(value)
+                row.source = source
                 row.computed_at = datetime.now(timezone.utc)
 
         await db.commit()
@@ -453,11 +454,8 @@ class BibliometrieAgent(BaseAgent):
 
     async def _dispatch_event(self, event: Event) -> None:
         """Bus callback — filter to the event types this agent cares about."""
-        try:
-            if event.type in ("veille.article_collected", "article.discovered"):
-                await self._handle_article_discovered(event)
-        except Exception as e:
-            print(f"[{self.name}] Error handling {event.type}: {e}")
+        if event.type in ("veille.article_collected", "article.discovered"):
+            await self._handle_article_discovered(event)
 
     async def handle_event(self, event: Event) -> Optional[AgentAction]:
         if event.type == "article.discovered":

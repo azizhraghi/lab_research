@@ -18,8 +18,18 @@ class MISAgent(BaseAgent):
     requires_human_approval = ["mis.delete_projet"]
 
     async def _setup_subscriptions(self):
-        """MIS subscribes to project and resource events."""
-        pass
+        """Request quality checks whenever a project's editable record changes."""
+        await self._subscribe("events", self._on_bus_event)
+
+    async def _on_bus_event(self, event: Event) -> None:
+        if event.type not in {"projet.created", "projet.updated"}:
+            return
+        await self.emit_event("events", Event(
+            id=f"mis-quality-{event.id}", type="qualite.validation_demandee",
+            source_agent=self.name,
+            payload={"entite_type": "projet", "entite_id": event.payload.get("id"),
+                     "data": event.payload},
+        ))
 
     async def handle_event(self, event: Event) -> Optional[AgentAction]:
         """Handle incoming events related to MIS resources."""

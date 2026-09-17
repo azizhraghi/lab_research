@@ -1,3 +1,5 @@
+> Latest continuation — 2026-09-08: see docs/IMPROVEMENTS-2026-09-08.md and README.md. The regression suite is now `python -m unittest discover -s tests -v`. Quality gating, project editing, collection failure handling and role defaults have changed. Real lab data is still to be obtained. The historical session entries below are preserved and do not describe the current pending list.
+
 # Session handoff — "make the platform actually work"
 
 Last updated: 2026-08-23. Keep this file current at the end of every session so a

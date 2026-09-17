@@ -1,0 +1,11 @@
+{
+  "checked_at": "2026-09-12T14:55:53.119122+00:00",
+  "status": "success",
+  "query": "water quality monitoring",
+  "records": 3,
+  "abstracts": 3,
+  "selected_title": "Sodium alginate/mesoporous silica composite hydrogel with AIE characteristics for sensitive detection and efficient capture of Fe3.",
+  "selected_url": "https://pubmed.ncbi.nlm.nih.gov/42636637/",
+  "exported_items": 1,
+  "scope": "Live source/API integration; temporary DB; no laboratory validation or AI synthesis"
+}

@@ -1,3 +1,5 @@
+> Current behavior and setup: see README.md and docs/IMPROVEMENTS-2026-09-08.md. The guidance below predates the latest integration and contains historical descriptions (including test-suite and environment-template claims). Do not use it as the current capability inventory.
+
 
 # CLAUDE.md
 

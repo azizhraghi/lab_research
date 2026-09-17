@@ -1,9 +1,15 @@
 from abc import ABC, abstractmethod
 from typing import List, Dict, Any, Optional
 import asyncio
+import logging
 from shared.schemas import Event, AgentAction, ActionResult, AuditEntry
 from shared.event_bus import event_bus
-from shared.database import get_db
+from shared.database import AsyncSessionLocal
+from shared.outbox import enqueue_event, outbox_dispatcher
+from shared.event_receipts import claim_event, mark_event_processed, release_event_claim
+
+
+logger = logging.getLogger("lrste.agent")
 
 class BaseAgent(ABC):
     name: str = "base_agent"
@@ -30,12 +36,32 @@ class BaseAgent(ABC):
           failure is logged and never prevents the API from starting.
         """
         from shared.event_bus import InMemoryEventBus, KafkaEventBus, RedisStreamsEventBus
+
+        async def idempotent_handler(event: Event) -> None:
+            if not await claim_event(self.name, event.id):
+                logger.info("event_delivery_skipped", extra={"agent": self.name, "event_id": event.id})
+                return
+            try:
+                await handler(event)
+            except Exception as exc:
+                await release_event_claim(self.name, event.id, exc)
+                raise
+            await mark_event_processed(self.name, event.id)
+
         try:
-            if isinstance(event_bus, RedisStreamsEventBus):
-                asyncio.create_task(event_bus.subscribe(stream, handler=handler))
+            if isinstance(event_bus, (RedisStreamsEventBus, KafkaEventBus)):
+                # Broker consumer groups balance work inside one group. Each
+                # agent therefore needs its own group to receive the full
+                # event stream rather than competing with the other agents.
+                asyncio.create_task(event_bus.subscribe(
+                    stream,
+                    group_name=f"{stream}-{self.name}",
+                    consumer_name=f"{self.name}-consumer",
+                    handler=idempotent_handler,
+                ))
             else:
                 # InMemory and Kafka both register-and-return.
-                await event_bus.subscribe(stream, handler)
+                await event_bus.subscribe(stream, idempotent_handler)
         except Exception as e:
             print(f"[{self.name}] Failed to subscribe to '{stream}': {e}")
 
@@ -76,8 +102,16 @@ class BaseAgent(ABC):
         pass
         
     async def emit_event(self, stream_name: str, event: Event) -> None:
-        """Emit an event to the bus."""
-        await event_bus.publish(stream_name, event)
+        """Persist an event before dispatching it (at-least-once delivery).
+
+        This generic path protects events emitted by background agents. Request
+        handlers that change domain data should use ``enqueue_event`` with
+        their existing session, so the data and event share one transaction.
+        """
+        async with AsyncSessionLocal() as db:
+            await enqueue_event(db, stream_name, event)
+            await db.commit()
+        outbox_dispatcher.notify()
         
     async def log_audit(self, entry: AuditEntry) -> None:
         """Log an audit entry."""

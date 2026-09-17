@@ -1,0 +1,14 @@
+{
+  "date": "2026-09-17",
+  "offline_regression": {"passed": 35, "duration_seconds": 21.574},
+  "typescript": "passed",
+  "frontend_build": {"status": "passed", "duration_seconds": 16.97, "modules": 2331, "large_bundle_advisory": true},
+  "browser_verified": ["Setup progress from saved project records", "Comparison of revisions 5 and 6 identifies added finding"],
+  "browser_limits": ["Complete interaction coverage of sharing, publication audit and parcel trail not performed", "Final readable comparison formatting typechecked and built, but not visually rechecked", "Export print layout unverified"],
+  "deployment_preflight": "blocked: Docker executable unavailable",
+  "postgres_restore": "not executed",
+  "real_redis_recovery": "not executed",
+  "remote_ci": "not executed",
+  "field_validation": "no lab data available",
+  "new_migrations": false
+}

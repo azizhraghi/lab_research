@@ -1,3 +1,5 @@
+> Archive: this August 2026 capability report is superseded by README.md and docs/IMPROVEMENTS-2026-09-08.md. Its operation count, tests, agent behavior and pending features are historical, not current verification.
+
 # LRSTE — Capacités réelles de la plateforme et feuille de route
 
 **Date : août 2026 · Audience : direction du laboratoire · Statut : vérifié**

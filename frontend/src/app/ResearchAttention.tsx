@@ -1,0 +1,17 @@
+import {useQuery,useMutation,useQueryClient} from "@tanstack/react-query";
+import {useAuth,useLabPermissions} from "../auth/AuthContext";
+import {apiFetch} from "../lib/apiClient";
+
+export function ResearchAttention({openProjects}:{openProjects:()=>void}){
+  const {user}=useAuth();const {isAdministrator}=useLabPermissions();const cache=useQueryClient();
+  const items=useQuery<{kind:string;title:string;detail:string;project_id:string}[]>({queryKey:["research-attention",user?.id],queryFn:()=>apiFetch('/api/mis/attention'),refetchInterval:30000});
+  const operations=useQuery<{summary:Record<string,number>;consumer_receipts:unknown;recent_events:{id:string;type:string;source_agent:string;status:string;consumers:{agent:string;status:string;error:string|null}[]}[];failed_events:{id:string;type:string;source_agent:string;attempts:number;last_error:string}[]}>({queryKey:["delivery-operations",user?.id],enabled:isAdministrator,queryFn:()=>apiFetch('/operations/outbox'),refetchInterval:30000});
+  const retry=useMutation({mutationFn:(id:string)=>apiFetch(`/operations/outbox/${id}/retry`,{method:'POST'}),onSuccess:()=>cache.invalidateQueries({queryKey:["delivery-operations"]})});
+  return <section className="border rounded-2xl p-5 bg-card space-y-3"><h3 className="font-bold">Needs attention</h3><p className="text-xs text-muted-foreground">Laboratory-wide pending reviews, overdue deliverables and open risks. Refreshed every 30 seconds.</p>
+    {items.isLoading&&<p>Loading actions…</p>}{items.isError&&<p role="alert">{items.error.message}</p>}
+    {items.data?.map((item,i)=><div key={`${item.kind}-${i}`} className="border-b py-2 flex justify-between gap-2 text-sm"><div><strong>{item.title}</strong><p>{item.detail}</p></div><button className="underline" onClick={openProjects}>Open projects</button></div>)}
+    {items.data?.length===0&&<p className="text-sm">No pending reviews, overdue deliverables or open risks recorded.</p>}
+    {isAdministrator&&<details><summary className="cursor-pointer font-semibold">Agent delivery operations</summary><p className="text-xs my-2">Transport delivery and consumer receipts are separate. Repair the dependency before retrying a failed event.</p>{operations.data&&<><p className="text-sm">{Object.entries(operations.data.summary).map(([key,value])=>`${key}: ${value}`).join(' · ')}</p><pre className="text-xs whitespace-pre-wrap">Consumer receipts: {JSON.stringify(operations.data.consumer_receipts)}</pre>{operations.data.failed_events.map(event=><article className="border rounded-lg p-3 my-2 text-sm" key={event.id}><strong>{event.source_agent} → {event.type}</strong><p>{event.attempts} attempts · {event.last_error}</p><button className="underline" disabled={retry.isPending} onClick={()=>retry.mutate(event.id)}>Retry delivery</button></article>)}</>}{operations.isError&&<p role="alert">{operations.error.message}</p>}{retry.isError&&<p role="alert">{retry.error.message}</p>}</details>}
+    {isAdministrator&&operations.data&&<details><summary className="cursor-pointer">Recent agent deliveries and consumer outcomes</summary>{operations.data.recent_events.map(event=><article className="border-b py-2 text-xs" key={event.id}><strong>{event.source_agent} → {event.type}</strong><p>Transport: {event.status} · event {event.id}</p>{event.consumers.map(c=><p key={c.agent}>{c.agent}: {c.status}{c.error?` · ${c.error}`:''}</p>)}{!event.consumers.length&&<p>No consumer receipt recorded yet.</p>}</article>)}</details>}
+  </section>;
+}

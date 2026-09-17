@@ -1,0 +1,15 @@
+FROM python:3.14-slim
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
+WORKDIR /app
+RUN apt-get update && apt-get install -y --no-install-recommends build-essential libpq-dev && rm -rf /var/lib/apt/lists/*
+COPY requirements/locked.txt /app/requirements.txt
+RUN pip install --no-cache-dir -r /app/requirements.txt
+COPY api /app/api
+COPY agents /app/agents
+COPY shared /app/shared
+COPY migrations /app/migrations
+COPY alembic.ini /app/alembic.ini
+RUN useradd --create-home lab && chown -R lab:lab /app
+USER lab
+EXPOSE 8000
+CMD ["sh", "-c", "python -m alembic upgrade head && exec python -m uvicorn api.main:app --host 0.0.0.0 --port 8000 --workers 1"]

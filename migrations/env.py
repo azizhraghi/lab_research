@@ -23,6 +23,11 @@ from agents.digitaltwin import models as digitaltwin_models
 from agents.simulation import models as simulation_models
 from agents.optimisation import models as optimisation_models
 from agents.mis import models as mis_models
+from agents.orchestrateur import models as orchestrateur_models
+from agents.qualite import models as qualite_models
+from api import public_models
+import shared.outbox
+import shared.event_receipts
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.

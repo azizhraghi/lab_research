@@ -20,6 +20,16 @@ class Researcher(Base):
     cv_profile = relationship("CVProfile", back_populates="researcher", uselist=False)
 
 
+class IdentityReview(Base):
+    __tablename__ = "biblio_identity_reviews"
+    id = Column(String, primary_key=True)
+    researcher_id = Column(Integer, nullable=False, index=True)
+    identifiers = Column(JSON, nullable=False)
+    reviewer_id = Column(String, nullable=False)
+    rationale = Column(String, nullable=False)
+    reviewed_at = Column(DateTime, default=datetime.datetime.utcnow, nullable=False)
+
+
 class Publication(Base):
     __tablename__ = "biblio_publications"
 
@@ -54,6 +64,7 @@ class BiblioIndicator(Base):
     researcher_id = Column(Integer, ForeignKey("biblio_researchers.id"))
     metric_name = Column(String) # h-index, citations, etc.
     value = Column(Float)
+    source = Column(String, nullable=True)
     computed_at = Column(DateTime, default=datetime.datetime.utcnow)
     
     researcher = relationship("Researcher", back_populates="indicators")

@@ -1,6 +1,6 @@
 """ArXiv fetcher for the veille (scientific watch) agent.
 
-ArXiv exposes an Atom API at http://export.arxiv.org/api/query that returns
+ArXiv exposes an Atom API at https://export.arxiv.org/api/query that returns
 results in Atom XML. This fetcher runs a search query and yields the same dict
 shape the RSS/Atom scraper produces (title/url/abstract/authors/published_at/doi),
 so the collection loop in VeilleAgent treats it identically.
@@ -17,7 +17,7 @@ import httpx
 import xml.etree.ElementTree as ET
 
 ATOM_NS = "{http://www.w3.org/2005/Atom}"
-ARXIV_API_URL = "http://export.arxiv.org/api/query"
+ARXIV_API_URL = "https://export.arxiv.org/api/query"
 ARXIV_NS = "{http://arxiv.org/schemas/atom}"
 
 
@@ -57,8 +57,7 @@ async def fetch_arxiv(search_query: str, max_results: int = 25) -> List[Dict[str
             response.raise_for_status()
             root = ET.fromstring(response.text)
         except Exception as e:
-            print(f"[veille:arxiv] Error querying ArXiv for '{search_query}': {e}")
-            return []
+            raise RuntimeError(f"ArXiv request failed ({type(e).__name__}): {e}") from e
 
     items: List[Dict[str, Any]] = []
     for entry in root.findall(f"{ATOM_NS}entry"):

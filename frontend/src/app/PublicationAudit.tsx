@@ -1,0 +1,8 @@
+import {useQuery} from '@tanstack/react-query';
+import {useAuth} from '../auth/AuthContext';
+import {apiFetch} from '../lib/apiClient';
+type Audit={total:number;needs_attention:number;validation:string;publications:{id:number;title:string;doi:string|null;year:number|null;source:string;issues:string[]}[]};
+export function PublicationAudit({researcherId}:{researcherId:string}){
+  const {user}=useAuth();const audit=useQuery<Audit>({queryKey:['publication-audit',user?.id,researcherId],enabled:!!researcherId,queryFn:()=>apiFetch(`/api/biblio/researchers/${researcherId}/publication-audit`)});
+  return <details className="border rounded-lg p-3"><summary className="cursor-pointer font-semibold">Publication checks before CV export</summary>{audit.isLoading&&<p>Checking publication records…</p>}{audit.isError&&<p role="alert">{audit.error.message}</p>}{audit.data&&<><p className="text-sm">{audit.data.total} publications · {audit.data.needs_attention} with metadata to inspect</p><p className="text-xs">{audit.data.validation}</p><button className="underline text-xs" disabled={audit.isFetching} onClick={()=>void audit.refetch()}>Refresh after publication edits or sync</button><div className="max-h-96 overflow-auto">{audit.data.publications.map(p=><article key={p.id} className="border-b py-2 text-sm"><strong>{p.title||'Untitled'}</strong><p>{p.year||'Year unknown'} · source: {p.source}</p>{p.doi&&<a className="underline" href={`https://doi.org/${encodeURIComponent(p.doi)}`} target="_blank" rel="noreferrer">Check DOI record ↗</a>}{p.issues.map(issue=><p key={issue}>{issue}</p>)}{!p.issues.length&&<p>No metadata gaps detected; authorship still needs checking.</p>}</article>)}</div></>}</details>;
+}

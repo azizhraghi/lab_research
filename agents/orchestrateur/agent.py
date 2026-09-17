@@ -59,10 +59,7 @@ class OrchestratorAgent(BaseAgent):
 
     async def _on_bus_event(self, event: Event) -> None:
         """Bus callback — route the event through the rule table + persist."""
-        try:
-            await self.handle_event(event)
-        except Exception as e:
-            print(f"[{self.name}] Error handling {event.type}: {e}")
+        await self.handle_event(event)
 
     async def handle_event(self, event: Event) -> Optional[AgentAction]:
         """Route an event through matching rules and persist the result."""

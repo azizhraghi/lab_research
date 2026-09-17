@@ -10,7 +10,7 @@ import type { Session } from "@supabase/supabase-js";
 import { supabase, isSupabaseConfigured } from "../lib/supabase";
 import { setTokenProvider } from "../lib/apiClient";
 
-export type Role = "researcher" | "reviewer" | "administrator";
+export type Role = "viewer" | "researcher" | "reviewer" | "administrator";
 
 export interface AuthUser {
   id: string;
@@ -32,7 +32,7 @@ interface AuthContextValue {
 const AuthContext = createContext<AuthContextValue | null>(null);
 
 const DEV_USER: AuthUser = { id: "dev", email: "dev@local", role: "administrator" };
-const VALID_ROLES: Role[] = ["researcher", "reviewer", "administrator"];
+const VALID_ROLES: Role[] = ["viewer", "researcher", "reviewer", "administrator"];
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [session, setSession] = useState<Session | null>(null);
@@ -45,7 +45,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const meta = (session.user.app_metadata ?? {}) as Record<string, unknown>;
     const role = VALID_ROLES.includes(meta.lab_role as Role)
       ? (meta.lab_role as Role)
-      : "researcher";
+      : "viewer";
     return { id: session.user.id, email: session.user.email ?? null, role };
   }, [session, devBypass]);
 
@@ -109,4 +109,13 @@ export function useAuth(): AuthContextValue {
   const ctx = useContext(AuthContext);
   if (!ctx) throw new Error("useAuth must be used within an AuthProvider");
   return ctx;
+}
+
+export function useLabPermissions() {
+  const { user } = useAuth();
+  return {
+    canWrite: !!user && user.role !== "viewer",
+    canReview: user?.role === "reviewer" || user?.role === "administrator",
+    isAdministrator: user?.role === "administrator",
+  };
 }

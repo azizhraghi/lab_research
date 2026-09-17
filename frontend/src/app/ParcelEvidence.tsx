@@ -1,0 +1,16 @@
+import {useQuery} from '@tanstack/react-query';
+import {useAuth} from '../auth/AuthContext';
+import {apiFetch} from '../lib/apiClient';
+type Trail={project_id:string|null;eligibility:{eligible:boolean;reason:string};readings:{id:number;recorded_at:string;moisture_mm:number;origin:string;quality:string;review:string}[];recommendations:{id:number;source_reading_id:number|null;generated_at:string;amount_mm:number;approved:boolean;reviewer:string|null}[];applications:{id:number;recommendation_id:number|null;occurred_at:string;amount_mm:number;source:string;recorded_by:string}[]};
+export function ParcelEvidence({parcelId}:{parcelId:number}){
+  const {user}=useAuth();const result=useQuery<Trail>({queryKey:['parcel-evidence',user?.id,parcelId],queryFn:()=>apiFetch(`/api/twin/parcels/${parcelId}/evidence-trail`),refetchInterval:15000});
+  const data=result.data;
+  return <section className="rounded-xl border bg-card p-4 space-y-3"><div className="flex justify-between gap-2"><h3 className="font-semibold">Measurement → advice → application</h3><button className="underline text-sm" disabled={result.isFetching} onClick={()=>void result.refetch()}>Refresh trail</button></div>
+    {result.isLoading&&<p role="status">Loading parcel evidence…</p>}{result.isError&&<p role="alert">{result.error.message}</p>}
+    {data&&<><p className="text-sm"><strong>{data.eligibility.eligible?'Eligible for advice':'Advice blocked'}: </strong>{data.eligibility.reason}</p><p className="text-xs">Latest 100 records per category. Applications record what was logged; they do not establish water savings or prediction accuracy. To evaluate a model, use paired observations and a defined baseline in the project research dossier.</p>
+      <details><summary className="cursor-pointer text-sm">Measurements · {data.readings.length}</summary>{data.readings.map(r=><p className="text-sm border-b py-2" key={r.id}>Reading #{r.id} · {r.recorded_at} UTC · {r.moisture_mm} mm · {r.origin} · {r.quality} / {r.review}</p>)}{!data.readings.length&&<p>No measurements recorded.</p>}</details>
+      <details><summary className="cursor-pointer text-sm">Advice and linked applications · {data.recommendations.length}</summary>{data.recommendations.map(r=><article className="border rounded-lg p-2 my-2 text-sm" key={r.id}><p>Advice #{r.id} · {r.generated_at} UTC · {r.amount_mm} mm</p><p>{r.source_reading_id?`Source reading #${r.source_reading_id}`:'No source-reading link recorded'} · {r.approved?`Approved by ${r.reviewer}`:'Awaiting approval'}</p>{data.applications.filter(a=>a.recommendation_id===r.id).map(a=><p key={a.id}>Application #{a.id} · {a.occurred_at} UTC · {a.amount_mm} mm · difference from advice {(a.amount_mm-r.amount_mm).toFixed(2)} mm · {a.source}</p>)}{!data.applications.some(a=>a.recommendation_id===r.id)&&<p>No application linked in this window.</p>}</article>)}{!data.recommendations.length&&<p>No recommendations recorded.</p>}</details>
+      <details><summary className="cursor-pointer text-sm">All recorded applications · {data.applications.length}</summary>{data.applications.map(a=><p className="text-sm border-b py-2" key={a.id}>Application #{a.id} · {a.occurred_at} UTC · {a.amount_mm} mm · {a.source} · {a.recommendation_id?`advice #${a.recommendation_id}`:'No recommendation link'} · recorded by {a.recorded_by}</p>)}</details>
+    </>}
+  </section>;
+}

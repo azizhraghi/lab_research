@@ -44,6 +44,8 @@ research-lab-agents/
 # Local run artifacts
 api_boot.log
 server_*.log
+regression-run.log
+docs/audit-*-run.log
 nul
 
 # Output of make_field_csv.py — a regenerable synthetic test fixture, not data.
@@ -55,3 +57,7 @@ field_readings.csv
 # store); cvs/ holds generated PDFs. Both are recreated on demand.
 data/
 cvs/
+
+# Local public-integration verification artifacts
+tmp/integration-evidence/
+tmp-live-check.log

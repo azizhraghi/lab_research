@@ -1,0 +1,66 @@
+{
+  "checked_at": "2026-09-12T03:45:59.263762+00:00",
+  "orcid": "0000-0003-1315-5960",
+  "name": "Geoffrey Bilder",
+  "identity_reference": "https://www.crossref.org/people/geoffrey-bilder",
+  "arxiv": {
+    "status": "unavailable",
+    "error": "ArXiv request failed (ReadTimeout): "
+  },
+  "scope": "Public-source integration example; not a laboratory member or scientific validation",
+  "citation_metrics": "Not verified: ORCID works do not supply citation counts",
+  "first_import": {
+    "researcher_id": 1,
+    "source": "orcid",
+    "orcid_id": "0000-0003-1315-5960",
+    "works_found": 239,
+    "publications_created": 239,
+    "publications_enriched": 0,
+    "links_created": 239,
+    "links_already_present": 0,
+    "citations_updated": 0
+  },
+  "repeat_import": {
+    "researcher_id": 1,
+    "source": "orcid",
+    "orcid_id": "0000-0003-1315-5960",
+    "works_found": 239,
+    "publications_created": 0,
+    "publications_enriched": 0,
+    "links_created": 0,
+    "links_already_present": 239,
+    "citations_updated": 0
+  },
+  "pdf_bytes": 21475,
+  "pubmed": {
+    "checked_at": "2026-09-12T10:16:39.321745+00:00",
+    "query": "water quality monitoring",
+    "scope": "live metadata fetch only; no LLM enrichment",
+    "status": "success",
+    "count": 1,
+    "items": [
+      {
+        "title": "Particle trajectory modelling of Escherichia coli at beaches and shellfish beds along the south-west UK coast.",
+        "url": "https://pubmed.ncbi.nlm.nih.gov/42727435/",
+        "abstract": null,
+        "authors": [
+          "Tilstone GH",
+          "Kurekin A",
+          "Land PE",
+          "Atwood EC",
+          "Fawcett S",
+          "Li Y",
+          "Torres R"
+        ],
+        "published_at": "2026-09-11 00:00:00",
+        "doi": "10.1016/j.marpolbul.2026.120320",
+        "source_type": "pubmed"
+      }
+    ]
+  },
+  "pdf_visual_check": {
+    "pages": 12,
+    "header_overlap_fixed": true,
+    "publication_entries_kept_together": true
+  }
+}
