@@ -15,6 +15,7 @@ class OptimizationConfig:
     run_name: str
     horizon_days: int
     max_irrigation_mm_per_day: float
+    initial_moisture_mm: float | None = None
     water_quota_mm: float | None = None
     rainfall_factor: float = 1.0
     et_factor: float = 1.0
@@ -35,10 +36,10 @@ def optimize_irrigation_schedule(
 ) -> dict[str, Any]:
     """Build a constrained schedule from explicit weather inputs and field limits."""
     ordered = sorted(readings, key=lambda row: row.recorded_at)
-    if not ordered:
+    if not ordered and config.initial_moisture_mm is None:
         raise ValueError("At least one sensor/weather reading is required")
 
-    latest = ordered[-1]
+    latest = ordered[-1] if ordered else None
     crop_coefficient = (
         float(config.crop_coefficient)
         if config.crop_coefficient is not None
@@ -57,7 +58,7 @@ def optimize_irrigation_schedule(
         1.0 + (config.temperature_delta_c * TEMP_ET_SENSITIVITY_PER_C),
     )
 
-    moisture = min(max(float(latest.soil_moisture_mm), 0.0), parcel.field_capacity_mm)
+    moisture = min(max(float(config.initial_moisture_mm if config.initial_moisture_mm is not None else latest.soil_moisture_mm), 0.0), parcel.field_capacity_mm)
     remaining_quota = (
         float("inf")
         if config.water_quota_mm is None

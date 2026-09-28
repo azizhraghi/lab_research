@@ -92,6 +92,7 @@ export function useRefreshForecast() {
  * correct for manual entry, and the CSV route forces "field_import".
  */
 export interface SensorReadingCreate {
+  data_origin?: "field" | "synthetic";
   recorded_at: string;
   /** Root-zone water STORAGE in mm, not volumetric %. ge=0, no upper bound. */
   soil_moisture_mm: number;
@@ -457,6 +458,7 @@ export function useSimulationRuns(parcelId?: number | null) {
  * them or the request is rejected with a 422.
  */
 export interface SimulationParams {
+  mode?: "demonstration" | "field";
   scenario_name?: string;
   horizon_days?: number;        // 3 … 16
   rainfall_factor?: number;     // 0 … 3
@@ -488,6 +490,8 @@ export function useOptimisationRuns(parcelId?: number | null) {
 }
 
 export interface OptimisationParams {
+  mode?: "demonstration" | "field";
+  initial_moisture_mm?: number | null;
   run_name?: string;
   horizon_days?: number;
   max_irrigation_mm_per_day?: number;

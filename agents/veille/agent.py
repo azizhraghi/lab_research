@@ -159,7 +159,16 @@ class VeilleAgent(BaseAgent):
         db.add(article)
         await db.flush()  # flush to get article.id
 
-        tags = await tag_article(item['title'], item.get('abstract') or "")
+        # Discovery and provenance remain valuable when optional AI enrichment is
+        # temporarily unavailable (for example, an upstream rate limit).  Persist
+        # the source record and make the incomplete enrichment explicit instead
+        # of silently dropping a real publication.
+        enrichment_warnings: list[str] = []
+        try:
+            tags = await tag_article(item['title'], item.get('abstract') or "")
+        except RuntimeError as exc:
+            tags = [{"tag": "Automated tagging pending", "confidence": None}]
+            enrichment_warnings.append(f"automated tagging pending: {exc}")
         for tag_info in tags:
             db.add(ArticleTag(
                 article_id=article.id,
@@ -167,8 +176,14 @@ class VeilleAgent(BaseAgent):
                 confidence=tag_info.get("confidence"),
             ))
 
+        # A missing generated summary is also visible in the collection warning;
+        # the source abstract is retained as the reviewable primary text.
         for lang in ["fr", "en"]:
-            summary = await summarize_article(item['title'], item.get('abstract') or "", language=lang)
+            try:
+                summary = await summarize_article(item['title'], item.get('abstract') or "", language=lang)
+            except RuntimeError as exc:
+                enrichment_warnings.append(f"{lang} summary pending: {exc}")
+                continue
             if summary:
                 db.add(ArticleSummary(
                     article_id=article.id,
@@ -183,6 +198,7 @@ class VeilleAgent(BaseAgent):
             "source": source.name,
             "url": item.get('url'),
             "doi": item.get('doi'),
+            "enrichment_warnings": enrichment_warnings,
         }
 
     async def run_collection(self, db: AsyncSession, trigger: str = "manual") -> CollectionRun:
@@ -206,6 +222,9 @@ class VeilleAgent(BaseAgent):
         db.add(run)
         await db.commit()
         await db.refresh(run)
+        # A failed transaction expires ORM attributes, so preserve the primary
+        # key before work begins for reliable failure reporting below.
+        run_id = run.id
         try:
             stmt = select(Source).where(Source.active == True)
             result = await db.execute(stmt)
@@ -214,6 +233,11 @@ class VeilleAgent(BaseAgent):
             articles_collected = 0
             warnings: list[str] = []
             successful_sources = 0
+            # Dispatch only after this collection has released its SQLite write
+            # transaction.  In-memory event consumers may write audit records,
+            # and dispatching between per-article commits can otherwise contend
+            # with the next source update in a local demo database.
+            pending_events: list[Event] = []
 
             for source in sources:
                 items, warning = await self._fetch_source(source)
@@ -231,11 +255,14 @@ class VeilleAgent(BaseAgent):
                         continue
                     if payload is None:
                         continue
+                    for enrichment_warning in payload.get("enrichment_warnings", []):
+                        warnings.append(
+                            f"{source.name}: {item.get('title', 'Article')[:100]}: {enrichment_warning}"
+                        )
                     source.last_scraped = datetime.datetime.utcnow()
                     run.articles_collected = articles_collected = articles_collected + 1
                     await db.commit()
-                    # Emit only after the commit so bus handlers don't contend for the lock.
-                    await self.emit_event("events", Event(
+                    pending_events.append(Event(
                         id=str(uuid4()),
                         type="veille.article_collected",
                         source_agent="veille",
@@ -252,10 +279,18 @@ class VeilleAgent(BaseAgent):
             run.completed_at = datetime.datetime.utcnow()
             await db.commit()
             await db.refresh(run)
+            for event in pending_events:
+                try:
+                    await self.emit_event("events", event)
+                except Exception as exc:
+                    # The literature is already durably collected.  Keep a
+                    # visible recovery signal without presenting it as a failed
+                    # source fetch or deleting the publication.
+                    warnings.append(f"event delivery pending: {type(exc).__name__}: {exc}")
             return run
         except Exception as exc:
             await db.rollback()
-            failed_run = await db.get(CollectionRun, run.id)
+            failed_run = await db.get(CollectionRun, run_id)
             if failed_run is not None:
                 failed_run.status = "failed"
                 failed_run.error_message = f"{type(exc).__name__}: {exc}"[:2000]

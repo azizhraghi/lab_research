@@ -1,10 +1,12 @@
 from datetime import date, datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
 
 class OptimizationRunRequest(BaseModel):
+    mode: Literal["demonstration", "field"] = "field"
+    initial_moisture_mm: Optional[float] = Field(None, ge=0.0, allow_inf_nan=False)
     run_name: str = "Constrained irrigation schedule"
     horizon_days: int = Field(14, ge=3, le=16)
     max_irrigation_mm_per_day: float = Field(25.0, ge=1.0, le=80.0)

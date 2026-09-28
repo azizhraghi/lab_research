@@ -1,4 +1,5 @@
 from __future__ import annotations
+from agents.digitaltwin.services.experiment import experiment_inputs, experiment_snapshot
 
 import datetime as dt
 from typing import Optional
@@ -16,6 +17,7 @@ from agents.digitaltwin.services.forecast import (
 )
 from agents.digitaltwin.services.irrigation import CROP_COEFFICIENTS
 from agents.optimisation.models import OptimizationRun
+from agents.simulation.services.water_balance import ProjectionConfig, run_water_balance_projection
 from agents.optimisation.schemas import OptimizationRunRequest
 from agents.optimisation.services.scheduler import (
     OptimizationConfig,
@@ -51,13 +53,8 @@ class OptimisationAgent(BaseAgent):
         if not parcel:
             raise ValueError(f"Parcel {parcel_id} not found")
 
-        readings = await operational_readings(db, parcel)
-
-        latest_reading = readings[-1]
-        start_date = max(
-            dt.date.today(),
-            latest_reading.recorded_at.date() + dt.timedelta(days=1),
-        )
+        readings, start_date = await experiment_inputs(db, parcel, request)
+        latest_reading = readings[-1] if readings else None
         forecast = await get_current_forecast_coverage(
             db=db,
             parcel_id=parcel_id,
@@ -75,19 +72,25 @@ class OptimisationAgent(BaseAgent):
             readings=readings,
             weather_inputs=forecast.inputs,
             config=OptimizationConfig(
-                **request.model_dump(),
+                **request.model_dump(exclude={"mode"}),
                 crop_coefficient=crop_coefficient,
                 weather_source=f"{forecast.provider} / {forecast.provider_model}",
                 forecast_retrieved_at=forecast.retrieved_at,
                 start_date=forecast.start_date,
             ),
         )
-        optimization["assumptions"].update({
-            "source_reading_id": latest_reading.id,
-            "forecast_coverage_start": forecast.start_date.isoformat(),
-            "forecast_coverage_end": forecast.end_date.isoformat(),
-            **calibration_metadata,
-        })
+        optimization["assumptions"].update(experiment_snapshot(parcel, request, readings, forecast))
+        optimization["assumptions"].update(calibration_metadata)
+        comparison = run_water_balance_projection(
+            parcel, readings, ProjectionConfig(
+                scenario_name=request.run_name, horizon_days=request.horizon_days,
+                rainfall_factor=request.rainfall_factor, et_factor=request.et_factor,
+                temperature_delta_c=request.temperature_delta_c,
+                initial_moisture_mm=request.initial_moisture_mm,
+                crop_coefficient=crop_coefficient, start_date=forecast.start_date,
+            ), weather_inputs=forecast.inputs,
+        )
+        optimization['assumptions']['comparison'] = comparison
 
         run = OptimizationRun(
             parcel_id=parcel_id,

@@ -75,6 +75,8 @@ async def approve_optimisation_run(
     run = await db.get(OptimizationRun, run_id)
     if run is None:
         raise HTTPException(status_code=404, detail="Optimisation run not found")
+    if (run.assumptions or {}).get("mode") == "demonstration":
+        raise HTTPException(status_code=409, detail="Demonstration plans cannot be approved or create field tasks.")
     if run.is_approved:
         raise HTTPException(status_code=409, detail="This optimisation run has already been approved")
 

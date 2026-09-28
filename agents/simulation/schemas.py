@@ -1,16 +1,17 @@
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
 
 class SimulationRunRequest(BaseModel):
+    mode: Literal["demonstration", "field"] = "field"
     scenario_name: str = "Drought stress scenario"
     horizon_days: int = Field(14, ge=3, le=16)
     rainfall_factor: float = Field(0.7, ge=0.0, le=3.0)
     et_factor: float = Field(1.15, ge=0.0, le=3.0)
     temperature_delta_c: float = Field(2.0, ge=-10.0, le=15.0)
-    initial_moisture_mm: Optional[float] = Field(None, ge=0.0)
+    initial_moisture_mm: Optional[float] = Field(None, ge=0.0, allow_inf_nan=False)
 
 
 class SimulationRunResponse(BaseModel):

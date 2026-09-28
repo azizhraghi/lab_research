@@ -541,6 +541,35 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(self.client.put(path,json={'date_fin_prevue':None,'statut':'suspendu'}).status_code,200)
         self.until(lambda: any(r['entite_id']==project['id'] for r in self.client.get('/api/qualite/rapports').json()))
 
+    def test_demonstration_experiments_preserve_inputs_and_block_approval(self):
+        from agents.digitaltwin.services.forecast import ForecastCoverage, WeatherInput
+        pid = self.parcel()
+        start = datetime.utcnow().date()
+        forecast = ForecastCoverage(inputs=[WeatherInput(0, 4, 20)] * 3,
+            start_date=start, end_date=start + timedelta(days=2),
+            retrieved_at=datetime.utcnow(), provider='fixture', provider_model='constant')
+        body = dict(mode='demonstration', initial_moisture_mm=70, horizon_days=3,
+                    rainfall_factor=.5, et_factor=1.2, temperature_delta_c=2)
+        with patch('agents.simulation.agent.get_current_forecast_coverage', new=AsyncMock(return_value=forecast)), patch('agents.optimisation.agent.get_current_forecast_coverage', new=AsyncMock(return_value=forecast)):
+            sim = self.client.post(f'/api/simulation/parcels/{pid}/runs', json=body)
+            opt = self.client.post(f'/api/optimisation/parcels/{pid}/runs', json={**body, 'water_quota_mm':10, 'max_irrigation_mm_per_day':5})
+            self.assertEqual(sim.status_code, 200, sim.text)
+            self.assertEqual(opt.status_code, 200, opt.text)
+            result = opt.json()
+            self.assertEqual(result['assumptions']['mode'], 'demonstration')
+            self.assertIsNone(result['assumptions']['source_reading_id'])
+            self.assertEqual(result['assumptions']['request']['initial_moisture_mm'], 70)
+            self.assertEqual(len(result['assumptions']['weather_inputs']), 3)
+            self.assertEqual(result['assumptions']['comparison']['time_series'], sim.json()['time_series'])
+            self.assertLessEqual(sum(r['irrigation_mm'] for r in result['schedule']), 10)
+            self.assertTrue(all(r['irrigation_mm'] <= 5 for r in result['schedule']))
+            self.assertEqual(self.client.post(f"/api/optimisation/runs/{result['id']}/approve").status_code, 409)
+            self.assertEqual(self.client.get(f"/api/optimisation/runs/{result['id']}").json()['assumptions'], result['assumptions'])
+            for kind in ('simulation', 'optimisation'):
+                path = f'/api/{kind}/parcels/{pid}/runs'
+                for invalid in ({**body, 'mode':'field'}, {**body, 'initial_moisture_mm':None}, {**body, 'initial_moisture_mm':999}):
+                    self.assertEqual(self.client.post(path, json=invalid).status_code, 400)
+
     def test_simulation_and_schedule_with_reviewed_input(self):
         from agents.digitaltwin.services.forecast import ForecastCoverage, WeatherInput
         pid=self.parcel()

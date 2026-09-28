@@ -1,3 +1,4 @@
+import { TwinExperiments } from "./TwinExperiments";
 import { LiteratureReviewWorkspace } from "./LiteratureReview";
 import { ProjectCompletion } from "./ProjectCompletion";
 import { ProjectDossier } from "./ProjectDossier";
@@ -15,7 +16,7 @@ import {
   Newspaper, Settings, ChevronLeft, ChevronRight, Search,
   Bell, Moon, Sun, X, TrendingUp, Activity,
   Globe, ArrowUpRight, ArrowDownRight,
-  AlertCircle, Clock, Play, RefreshCw, Info,
+  AlertCircle, Clock, RefreshCw, Info,
   Download, ExternalLink,
   Thermometer, Droplets, Wind, Gauge, MapPin,
   Brain, Network, Shield, Target, FlaskConical, Microscope,
@@ -28,11 +29,11 @@ import {
   Plus, Loader2, CheckCircle2, Trash2, Upload, Pencil
 } from "lucide-react";
 import {
-  AreaChart, Area, BarChart, Bar, LineChart as ReLineChart, Line,
+  AreaChart, Area, BarChart, Bar, 
   XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer
 } from "recharts";
 import { useAuth, useLabPermissions } from "../auth/AuthContext";
-import type { Article, Researcher as ApiResearcher, HistoriqueEvenement, Projet, Personnel, Equipement, Parcel, ParcelDetail, SensorReadingFull, CalibrationProfile, Alerte, IrrigationEvent, Recommendation, PlanningTask, MeasurementReview, OptimizationRun } from "../api/types";
+import type { Article, Researcher as ApiResearcher, HistoriqueEvenement, Projet, Personnel, Equipement, Parcel, ParcelDetail, SensorReadingFull, CalibrationProfile, Alerte, IrrigationEvent, Recommendation, PlanningTask, MeasurementReview } from "../api/types";
 import { API_BASE_URL } from "../lib/apiClient";
 import { useArticles, useTriggerScrape, useSources, useCreateSource, useDeleteSource, useWatchSubscriptions, useCreateWatchSubscription, useUpdateWatchSubscription, useDeleteWatchSubscription, useWatchInbox, useUpdateArticleState, useCollectionRuns } from "../api/veille";
 import {
@@ -57,12 +58,6 @@ import { useOrchestratorStatus, useAlertes, useHistorique, useResolveAlerte, use
 import {
   useParcels,
   useParcel,
-  useParcelForecast,
-  useRefreshForecast,
-  useRunSimulation,
-  useSimulationRuns,
-  useOptimisationRuns,
-  useRunOptimisation,
   useCreateParcel,
   useReadings,
   useCreateReading,
@@ -78,7 +73,6 @@ import {
   useSensorDevices,
   useProvisionSensorDevice,
   useFieldTasks,
-  useApproveOptimisationRun,
   useCompleteFieldTask,
 } from "../api/digitaltwin";
 import type { SensorReadingDeleteResult } from "../api/digitaltwin";
@@ -2591,12 +2585,6 @@ function AgentsPage({ setPage }: { setPage: (p: Page) => void }) {
 // Scenario presets. These are UI shorthand for real SimulationRunRequest
 // parameters (agents/simulation/schemas.py) — nothing here is invented data, the
 // numbers are just starting points the user can then move with the sliders.
-const SIM_PRESETS: Record<string, { label: string; rainfall_factor: number; et_factor: number; temperature_delta_c: number }> = {
-  baseline: { label: "Baseline", rainfall_factor: 1.0, et_factor: 1.0, temperature_delta_c: 0 },
-  dry: { label: "Dry", rainfall_factor: 0.7, et_factor: 1.15, temperature_delta_c: 2 },
-  hot_dry: { label: "Hot + Dry", rainfall_factor: 0.5, et_factor: 1.3, temperature_delta_c: 4 },
-};
-
 // POST /api/twin/parcels takes a ParcelCreate (agents/digitaltwin/schemas.py).
 // crop_type, soil_type, field_capacity_mm and wilting_point_mm have server-side
 // defaults; the form pre-fills them with those same values so what you see is
@@ -2694,441 +2682,11 @@ function NewParcelForm({
 }
 
 function DigitalTwinsPage() {
-  const [scenario, setScenario] = useState("baseline");
-  const [selectedId, setSelectedId] = useState<number | null>(null);
-  const [creatingParcel, setCreatingParcel] = useState(false);
-  // Scenario knobs, initialised from the baseline preset. Bounds match the
-  // server-side Field() constraints so the API never 422s on our input.
-  const [horizonDays, setHorizonDays] = useState(14);
-  const [rainfallFactor, setRainfallFactor] = useState(SIM_PRESETS.baseline.rainfall_factor);
-  const [etFactor, setEtFactor] = useState(SIM_PRESETS.baseline.et_factor);
-  const [tempDelta, setTempDelta] = useState(SIM_PRESETS.baseline.temperature_delta_c);
-  const [waterQuota, setWaterQuota] = useState("");
-  const [dailyCap, setDailyCap] = useState("25");
-
-  const applyPreset = (key: string) => {
-    const p = SIM_PRESETS[key];
-    if (!p) return;
-    setScenario(key);
-    setRainfallFactor(p.rainfall_factor);
-    setEtFactor(p.et_factor);
-    setTempDelta(p.temperature_delta_c);
-  };
-
-  const { data: parcels, isLoading: parcelsLoading } = useParcels();
-  const effectiveId = selectedId ?? (parcels && parcels.length ? parcels[0].id : null);
-  const { data: parcel, isLoading: parcelLoading } = useParcel(effectiveId);
-  const { data: forecast } = useParcelForecast(effectiveId);
-  const refreshForecast = useRefreshForecast();
-  const runSim = useRunSimulation();
-  const runOptimisation = useRunOptimisation();
-  const { data: simRuns } = useSimulationRuns(effectiveId);
-  const { data: optRuns } = useOptimisationRuns(effectiveId);
-  const approveOptimisation = useApproveOptimisationRun();
-
-  // Real projection from the latest simulation run (runs come back newest-first).
-  // Row shape is produced by agents/simulation/services/water_balance.py::_merge_series.
-  const latestRun = simRuns?.[0];
-  const simData = ((latestRun?.time_series ?? []) as unknown as Array<{
-    day: number;
-    baseline?: { soil_moisture_end_mm?: number };
-    scenario?: { soil_moisture_end_mm?: number };
-  }>).map(row => ({
-    day: `D${row.day}`,
-    baseline: row.baseline?.soil_moisture_end_mm ?? 0,
-    scenario: row.scenario?.soil_moisture_end_mm ?? 0,
-  }));
-
-  // Day scrubber over the real projection (was a decorative 2024→2044 slider,
-  // which misrepresented a run whose horizon is at most 16 days).
-  const [dayIndex, setDayIndex] = useState(0);
-  const cursor = simData.length ? simData[Math.min(dayIndex, simData.length - 1)] : null;
-
-  if (parcelsLoading) {
-    return (
-      <div className="h-full overflow-y-auto scrollbar-hide p-6">
-        <div className="animate-pulse bg-card border border-border rounded-2xl h-40" />
-      </div>
-    );
-  }
-
-  if (!parcels || parcels.length === 0) {
-    return (
-      <div className="h-full overflow-y-auto scrollbar-hide p-6">
-        <div className="bg-card border border-border rounded-2xl p-10 text-center">
-          <MapPin size={28} className="mx-auto text-muted-foreground mb-3" />
-          <h2 className="text-xl font-bold text-foreground font-jakarta">Digital Twins</h2>
-          <p className="text-sm text-muted-foreground mt-2 mb-5 max-w-md mx-auto">
-            No parcels yet. A parcel is the unit a twin is built on — add one with its coordinates
-            and soil profile, and the agent can pull a weather forecast and run water-balance simulations against it.
-          </p>
-          <button onClick={() => setCreatingParcel(true)}
-            className="inline-flex items-center gap-2 px-4 py-2 text-sm font-semibold rounded-xl bg-primary text-primary-foreground shadow-lg shadow-primary/20 hover:opacity-90 transition-all duration-200">
-            <Plus size={15} />Add parcel
-          </button>
-        </div>
-        <Modal open={creatingParcel} onClose={() => setCreatingParcel(false)} title="Add a parcel"
-          subtitle="Stored by the digital-twin agent · POST /api/twin/parcels (administrator only)">
-          <NewParcelForm onDone={() => setCreatingParcel(false)} />
-        </Modal>
-      </div>
-    );
-  }
-
-  const sensorRows = parcel ? [
-    { label: "Crop Type", value: parcel.crop_type, status: "normal" },
-    { label: "Area", value: `${parcel.area_ha} ha`, status: "normal" },
-    { label: "Soil Type", value: parcel.soil_type, status: "normal" },
-    { label: "Field Capacity", value: `${parcel.field_capacity_mm} mm`, status: "normal" },
-    { label: "Wilting Point", value: `${parcel.wilting_point_mm} mm`, status: "normal" },
-    { label: "Coordinates", value: `${parcel.latitude.toFixed(3)}, ${parcel.longitude.toFixed(3)}`, status: "normal" },
-  ] : [];
-  const totalPrecip = forecast?.reduce((n, f) => n + f.precipitation_mm, 0) ?? 0;
-
-  return (
-    <div className="h-full overflow-y-auto scrollbar-hide">
-      <div className="p-6 pb-4">
-        <div className="flex items-center justify-between mb-4 flex-wrap gap-3">
-          <div>
-            <h2 className="text-xl font-bold text-foreground font-jakarta">
-              Digital Twin — {parcel?.name ?? "Loading…"}
-            </h2>
-            <p className="text-sm text-muted-foreground">
-              {parcel
-                ? `${parcel.code} · ${parcel.crop_type} · ${forecast?.length ?? 0}-day forecast (${totalPrecip.toFixed(0)} mm precip)`
-                : "Real-time digital replica"}
-            </p>
-          </div>
-          <div className="flex items-center gap-2 flex-wrap">
-            <select
-              value={effectiveId ?? ""}
-              onChange={e => setSelectedId(Number(e.target.value))}
-              className="px-3 py-1.5 rounded-xl text-xs font-semibold bg-muted text-foreground border border-border focus:outline-none focus:ring-2 focus:ring-primary/30"
-            >
-              {parcels.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
-            </select>
-            <button
-              onClick={() => setCreatingParcel(true)}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold bg-primary text-primary-foreground shadow-lg shadow-primary/20 hover:opacity-90 transition-all duration-200"
-            >
-              <Plus size={13} /> Add parcel
-            </button>
-            <button
-              onClick={() => effectiveId && refreshForecast.mutate(effectiveId)}
-              disabled={refreshForecast.isPending}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold bg-muted text-foreground hover:bg-secondary disabled:opacity-60 transition-colors"
-            >
-              <RefreshCw size={13} className={refreshForecast.isPending ? "animate-spin" : ""} /> Refresh forecast
-            </button>
-            {Object.entries(SIM_PRESETS).map(([key, p]) => (
-              <button key={key} onClick={() => applyPreset(key)}
-                className={`px-3 py-1.5 rounded-xl text-xs font-semibold transition-colors
-                  ${scenario === key ? "bg-primary text-white" : "bg-muted text-muted-foreground hover:bg-secondary"}`}>
-                {p.label}
-              </button>
-            ))}
-          </div>
-        </div>
-      </div>
-
-      <Modal open={creatingParcel} onClose={() => setCreatingParcel(false)} title="Add a parcel"
-        subtitle="Stored by the digital-twin agent · POST /api/twin/parcels (administrator only)">
-        <NewParcelForm onDone={() => setCreatingParcel(false)} />
-      </Modal>
-
-      <div className="px-6 pb-6 grid grid-cols-1 xl:grid-cols-3 gap-5">
-        {/* GIS Map placeholder */}
-        <div className="xl:col-span-1 bg-card border border-border rounded-2xl overflow-hidden">
-          <div className="p-4 border-b border-border flex items-center justify-between">
-            <h3 className="text-sm font-bold text-foreground font-jakarta">Spatial View</h3>
-            <Map size={16} className="text-muted-foreground" />
-          </div>
-          <div className="relative h-64 bg-gradient-to-br from-[#0F3D2E] to-[#1a5c3a] overflow-hidden">
-            {/* Simulated map grid */}
-            <svg viewBox="0 0 300 200" className="w-full h-full opacity-30">
-              {Array.from({ length: 8 }, (_, i) => (
-                <line key={`h${i}`} x1="0" y1={i * 25} x2="300" y2={i * 25} stroke="#4ADE80" strokeWidth="0.5" />
-              ))}
-              {Array.from({ length: 12 }, (_, i) => (
-                <line key={`v${i}`} x1={i * 25} y1="0" x2={i * 25} y2="200" stroke="#4ADE80" strokeWidth="0.5" />
-              ))}
-              <ellipse cx="150" cy="100" rx="80" ry="50" fill="rgba(74,222,128,0.15)" stroke="#4ADE80" strokeWidth="1.5" strokeDasharray="5,3" />
-              <ellipse cx="150" cy="100" rx="50" ry="30" fill="rgba(74,222,128,0.2)" stroke="#4ADE80" strokeWidth="1" />
-              <circle cx="120" cy="90" r="5" fill="#4ADE80" />
-              <circle cx="160" cy="110" r="4" fill="#4ADE80" />
-              <circle cx="180" cy="85" r="5" fill="#4ADE80" />
-              <circle cx="140" cy="120" r="3" fill="#F59E0B" />
-            </svg>
-            <div className="absolute inset-0 flex items-end p-3">
-              <div className="flex gap-3 text-[10px] text-white/80">
-                <div className="flex items-center gap-1"><div className="w-3 h-3 rounded-full bg-accent/70" />Sensors</div>
-                <div className="flex items-center gap-1"><div className="w-3 h-3 rounded-full bg-amber-400/70" />Anomaly</div>
-                <div className="flex items-center gap-1"><div className="w-3 h-3 border border-accent/70 rounded-sm" />Aquifer</div>
-              </div>
-            </div>
-          </div>
-          {/* Sensor readings (live parcel data) */}
-          <div className="p-4 space-y-2">
-            {parcelLoading && <p className="text-xs text-muted-foreground">Loading parcel…</p>}
-            {sensorRows.map(s => (
-              <div key={s.label} className="flex items-center justify-between text-xs">
-                <span className="text-muted-foreground">{s.label}</span>
-                <div className="flex items-center gap-2">
-                  <span className="font-semibold text-foreground font-mono">{s.value}</span>
-                  <div className={`w-2 h-2 rounded-full ${s.status === "normal" ? "bg-accent" : "bg-amber-400"}`} />
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
-
-        {/* 3D Twin Viewer */}
-        <div className="xl:col-span-1 bg-card border border-border rounded-2xl overflow-hidden">
-          <div className="p-4 border-b border-border flex items-center justify-between">
-            <h3 className="text-sm font-bold text-foreground font-jakarta">3D Twin Viewer</h3>
-            <div className="flex items-center gap-1.5 text-[10px] text-accent font-semibold">
-              <div className="w-1.5 h-1.5 bg-accent rounded-full animate-pulse" />Live
-            </div>
-          </div>
-          <div className="relative h-64 bg-gradient-to-b from-[#e8f4f8] to-[#c8e6f4] flex items-center justify-center overflow-hidden">
-            {/* SVG geological cross-section */}
-            <svg viewBox="0 0 280 180" className="w-full h-full">
-              {/* Sky */}
-              <rect x="0" y="0" width="280" height="60" fill="#E0F2FE" />
-              {/* Terrain */}
-              <path d="M0,60 Q40,40 80,55 Q120,70 160,48 Q200,30 240,52 Q260,60 280,50 L280,70 Q240,72 200,62 Q160,55 120,80 Q80,88 40,72 L0,75 Z" fill="#8B7355" />
-              {/* Soil layer */}
-              <path d="M0,75 Q40,72 80,88 Q120,100 160,85 Q200,72 240,82 L280,72 L280,110 L0,110 Z" fill="#A0845A" />
-              {/* Rock layer */}
-              <rect x="0" y="110" width="280" height="30" fill="#7A7A8A" />
-              {/* Aquifer */}
-              <path d="M0,130 L280,130 L280,170 L0,170 Z" fill="rgba(74,222,128,0.3)" stroke="#4ADE80" strokeWidth="1" />
-              <text x="120" y="155" fill="#0B6E4F" fontSize="10" fontWeight="bold">AQUIFER ZONE</text>
-              {/* Water level indicator */}
-              <line x1="0" y1="135" x2="280" y2="135" stroke="#2D9C72" strokeWidth="1.5" strokeDasharray="6,3" />
-              {/* Bore holes */}
-              <rect x="80" y="50" width="4" height="95" fill="#555" />
-              <rect x="180" y="44" width="4" height="95" fill="#555" />
-              {/* Sensor dots */}
-              <circle cx="82" cy="135" r="5" fill="#4ADE80" />
-              <circle cx="182" cy="135" r="5" fill="#4ADE80" />
-              <circle cx="82" cy="50" r="4" fill="#F59E0B" />
-              <circle cx="182" cy="44" r="4" fill="#F59E0B" />
-            </svg>
-          </div>
-          {/* Day scrubber over the latest real run */}
-          <div className="p-4">
-            <div className="flex items-center justify-between text-xs mb-2">
-              <span className="text-muted-foreground">Projection Day</span>
-              <span className="font-mono font-semibold text-foreground">
-                {cursor ? `${cursor.day} · ${cursor.scenario.toFixed(1)} mm` : "—"}
-              </span>
-            </div>
-            <input
-              type="range" min={0} max={Math.max(0, simData.length - 1)}
-              value={Math.min(dayIndex, Math.max(0, simData.length - 1))}
-              onChange={e => setDayIndex(+e.target.value)}
-              disabled={simData.length === 0}
-              className="w-full accent-primary cursor-pointer disabled:cursor-not-allowed disabled:opacity-40"
-            />
-            {cursor ? (
-              <div className="flex justify-between text-[9px] text-muted-foreground mt-1">
-                <span>Baseline {cursor.baseline.toFixed(1)} mm</span>
-                <span>Scenario {cursor.scenario.toFixed(1)} mm</span>
-                <span>Δ {(cursor.scenario - cursor.baseline).toFixed(1)} mm</span>
-              </div>
-            ) : (
-              <p className="text-[9px] text-muted-foreground mt-1">
-                No simulation run for this parcel yet — run one to scrub the projection.
-              </p>
-            )}
-          </div>
-        </div>
-
-        {/* Simulation Controls & Charts */}
-        <div className="xl:col-span-1 space-y-4">
-          {/* Scenario chart */}
-          <div className="bg-card border border-border rounded-2xl p-4">
-            <h3 className="text-sm font-bold text-foreground font-jakarta mb-1">Scenario Comparison</h3>
-            <p className="text-[10px] text-muted-foreground mb-3">
-              {latestRun
-                ? `Soil moisture (mm) — “${latestRun.scenario_name}” over ${latestRun.horizon_days} days`
-                : "Soil moisture (mm) — no simulation run yet"}
-            </p>
-            {simData.length === 0 ? (
-              <div className="h-[160px] flex items-center justify-center text-center text-[11px] text-muted-foreground px-4">
-                Run a simulation to project this parcel's water balance.
-              </div>
-            ) : (
-              <ResponsiveContainer width="100%" height={160}>
-                <ReLineChart data={simData}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
-                  <XAxis dataKey="day" tick={{ fontSize: 9 }} stroke="none" interval="preserveStartEnd" />
-                  <YAxis tick={{ fontSize: 9 }} stroke="none" />
-                  <Tooltip contentStyle={{ borderRadius: 10, fontSize: 11 }} />
-                  <Line dataKey="baseline" name="Baseline" stroke="#0B6E4F" strokeWidth={2} dot={false} />
-                  <Line dataKey="scenario" name="Scenario" stroke="#F59E0B" strokeWidth={2} dot={false} strokeDasharray="4,2" />
-                </ReLineChart>
-              </ResponsiveContainer>
-            )}
-          </div>
-
-          {/* Controls — these are the actual request body of
-              POST /api/simulation/parcels/{id}/runs, not decoration. */}
-          <div className="bg-card border border-border rounded-2xl p-4">
-            <h3 className="text-sm font-bold text-foreground font-jakarta mb-1">Scenario Parameters</h3>
-            <p className="text-[10px] text-muted-foreground mb-3">
-              Sent to the simulation agent as-is. Ranges match the server-side constraints.
-            </p>
-            <div className="space-y-3">
-              {([
-                { label: "Horizon", value: horizonDays, set: setHorizonDays, unit: "days", min: 3, max: 16, step: 1, fmt: (v: number) => String(v) },
-                { label: "Rainfall factor", value: rainfallFactor, set: setRainfallFactor, unit: "×", min: 0, max: 3, step: 0.05, fmt: (v: number) => v.toFixed(2) },
-                { label: "Evapotranspiration factor", value: etFactor, set: setEtFactor, unit: "×", min: 0, max: 3, step: 0.05, fmt: (v: number) => v.toFixed(2) },
-                { label: "Temperature delta", value: tempDelta, set: setTempDelta, unit: "°C", min: -10, max: 15, step: 0.5, fmt: (v: number) => (v > 0 ? `+${v.toFixed(1)}` : v.toFixed(1)) },
-              ]).map(c => (
-                <div key={c.label}>
-                  <div className="flex justify-between text-xs mb-1">
-                    <span className="text-muted-foreground">{c.label}</span>
-                    <span className="font-mono font-semibold text-foreground">{c.fmt(c.value)} {c.unit}</span>
-                  </div>
-                  <input
-                    type="range" min={c.min} max={c.max} step={c.step} value={c.value}
-                    onChange={e => { c.set(+e.target.value); setScenario("custom"); }}
-                    className="w-full accent-primary cursor-pointer"
-                  />
-                </div>
-              ))}
-              <button
-                onClick={() => {
-                  if (!effectiveId) return;
-                  runSim.mutate({
-                    parcelId: effectiveId,
-                    params: {
-                      scenario_name: `${SIM_PRESETS[scenario]?.label ?? "Custom"} — ${horizonDays}d`,
-                      horizon_days: horizonDays,
-                      rainfall_factor: rainfallFactor,
-                      et_factor: etFactor,
-                      temperature_delta_c: tempDelta,
-                    },
-                  });
-                  setDayIndex(0);
-                }}
-                disabled={runSim.isPending}
-                className="w-full py-2 bg-gradient-to-r from-primary to-[#2D9C72] text-white text-xs font-bold rounded-xl hover:shadow-lg hover:shadow-primary/20 transition-all mt-2 flex items-center justify-center gap-2 disabled:opacity-60"
-              >
-                <Play size={13} /> {runSim.isPending ? "Running…" : "Run Simulation"}
-              </button>
-              {runSim.isError && <p className="text-[10px] text-red-600 mt-1">{(runSim.error as Error).message}</p>}
-              <button
-                onClick={() => effectiveId && runOptimisation.mutate({
-                  parcelId: effectiveId,
-                  params: {
-                    max_irrigation_mm_per_day: Number(dailyCap) || 25,
-                    water_quota_mm: waterQuota.trim() === "" ? null : Number(waterQuota),
-                  },
-                })}
-                disabled={runOptimisation.isPending}
-                className="w-full py-2 border border-primary/30 text-primary text-xs font-bold rounded-xl hover:bg-primary/10 transition-all mt-2 flex items-center justify-center gap-2 disabled:opacity-60"
-              >
-                <Target size={13} /> {runOptimisation.isPending ? "Optimising…" : "Optimise Irrigation"}
-              </button>
-              {runOptimisation.isError && <p className="text-[10px] text-red-600 mt-1">{(runOptimisation.error as Error).message}</p>}
-              <div className="grid grid-cols-2 gap-2 pt-1">
-                <label className="text-[10px] text-muted-foreground">
-                  Water quota (mm)
-                  <input value={waterQuota} onChange={e => setWaterQuota(e.target.value)} inputMode="decimal" placeholder="No limit"
-                    className="mt-1 w-full rounded-lg border border-border bg-background px-2 py-1.5 text-xs text-foreground" />
-                </label>
-                <label className="text-[10px] text-muted-foreground">
-                  Daily capacity (mm)
-                  <input value={dailyCap} onChange={e => setDailyCap(e.target.value)} inputMode="decimal"
-                    className="mt-1 w-full rounded-lg border border-border bg-background px-2 py-1.5 text-xs text-foreground" />
-                </label>
-              </div>
-            </div>
-          </div>
-
-          {/* Recent runs */}
-          <div className="bg-card border border-border rounded-2xl p-4">
-            <h3 className="text-sm font-bold text-foreground font-jakarta mb-3">Recent Runs</h3>
-            <div className="space-y-3 text-xs">
-              <div>
-                <p className="font-semibold text-foreground mb-1">Simulation</p>
-                {simRuns && simRuns.length > 0 ? (
-                  <ul className="space-y-1">
-                    {simRuns.slice(0, 3).map(r => (
-                      <li key={r.id} className="flex justify-between text-muted-foreground">
-                        <span className="truncate pr-2">{r.scenario_name}</span>
-                        <span className="font-mono">{new Date(r.created_at).toLocaleDateString()}</span>
-                      </li>
-                    ))}
-                  </ul>
-                ) : <p className="text-muted-foreground">No runs yet.</p>}
-              </div>
-              <div>
-                <p className="font-semibold text-foreground mb-1">Optimisation</p>
-                {optRuns && optRuns.length > 0 ? (
-                  <ul className="space-y-1">
-                    {optRuns.slice(0, 3).map(r => (
-                      <li key={r.id} className="flex justify-between text-muted-foreground">
-                        <span className="truncate pr-2">{r.run_name}</span>
-                        <span className="font-mono">{new Date(r.created_at).toLocaleDateString()}</span>
-                      </li>
-                    ))}
-                  </ul>
-                ) : <p className="text-muted-foreground">No runs yet.</p>}
-              </div>
-              {optRuns?.[0] && (
-                <OptimisationSchedulePanel
-                  run={optRuns[0]}
-                  onApprove={() => approveOptimisation.mutate(optRuns[0].id)}
-                  approving={approveOptimisation.isPending}
-                />
-              )}
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-// ─── SENSOR READING INGESTION ────────────────────────────────────────────────
-
-function OptimisationSchedulePanel({ run, onApprove, approving }: {
-  run: OptimizationRun; onApprove: () => void; approving: boolean;
-}) {
-  const { canReview } = useLabPermissions();
-  const summary = run.summary as Record<string, unknown>;
-  return (
-    <div className="mt-4 rounded-xl border border-border bg-muted/30 p-3">
-      <div className="flex items-start justify-between gap-2 mb-2">
-        <div>
-          <p className="text-xs font-bold text-foreground">Complete irrigation schedule</p>
-          <p className="text-[10px] text-muted-foreground">
-            {run.water_quota_mm == null ? "No total quota" : `${run.water_quota_mm} mm quota`} · {run.max_irrigation_mm_per_day} mm/day cap
-          </p>
-        </div>
-        {!run.is_approved ? (
-          <button onClick={onApprove} disabled={approving || !canReview} title={!canReview ? "Reviewer role required" : undefined}
-            className="shrink-0 rounded-lg bg-primary px-2 py-1 text-[10px] font-bold text-primary-foreground disabled:opacity-60">
-            {approving ? "Approving…" : "Approve & create tasks"}
-          </button>
-        ) : <span className="text-[10px] font-bold text-emerald-700">Approved</span>}
-      </div>
-      <div className="max-h-48 overflow-auto">
-        <table className="w-full text-[10px]">
-          <thead className="text-muted-foreground"><tr><th className="pb-1 text-left">Date</th><th className="pb-1 text-right">Water</th><th className="pb-1 text-right">End moisture</th><th className="pb-1 text-right">Decision</th></tr></thead>
-          <tbody>{run.schedule.map((row, index) => {
-            const value = (key: string) => row[key] as string | number | boolean | undefined;
-            return <tr key={index} className="border-t border-border/60"><td className="py-1">{String(value("date") ?? "—")}</td><td className="py-1 text-right font-semibold">{Number(value("irrigation_mm") ?? 0).toFixed(1)} mm</td><td className="py-1 text-right">{Number(value("soil_moisture_end_mm") ?? 0).toFixed(1)}</td><td className="py-1 text-right capitalize">{String(value("decision") ?? "—")}</td></tr>;
-          })}</tbody>
-        </table>
-      </div>
-      <p className="mt-2 text-[10px] text-muted-foreground">Projected total: {String(summary.total_irrigation_mm ?? "—")} mm. Approval creates tasks only for irrigation days; staff confirm what was actually applied.</p>
-    </div>
-  );
+  const [creating, setCreating] = useState(false);
+  return <><TwinExperiments onAddParcel={() => setCreating(true)} />
+    <Modal open={creating} onClose={() => setCreating(false)} title="Add a parcel">
+      <NewParcelForm onDone={() => setCreating(false)} />
+    </Modal></>;
 }
 
 function FieldOperationsPanel({ parcelId }: { parcelId: number }) {
@@ -3267,6 +2825,7 @@ function AddReadingForm({ parcelId, parcel, onDone }: {
   const [temperature, setTemperature] = useState("");
   const [sensorCode, setSensorCode] = useState("");
   const [qualityFlag, setQualityFlag] = useState("ok");
+  const [dataOrigin, setDataOrigin] = useState<"field" | "synthetic">("field");
   // Converter — local scratch values, never sent to the API.
   const [vwc, setVwc] = useState("");
   const [depth, setDepth] = useState("");
@@ -3303,6 +2862,7 @@ function AddReadingForm({ parcelId, parcel, onDone }: {
           temperature_c: temperature.trim() === "" ? null : Number(temperature),
           sensor_code: sensorCode.trim(),
           quality_flag: qualityFlag,
+          data_origin: dataOrigin,
         },
       },
       { onSuccess: onDone },
@@ -3315,6 +2875,14 @@ function AddReadingForm({ parcelId, parcel, onDone }: {
         hint="Local time, recorded exactly as entered (no timezone conversion).">
         <input type="datetime-local" required value={recordedAt}
           onChange={e => setRecordedAt(e.target.value)} className={inputCls} />
+      </Field>
+      <Field label="Data origin" required
+        hint="Synthetic demonstration entries remain visible for training and review, but cannot generate field irrigation advice.">
+        <select value={dataOrigin} onChange={e => setDataOrigin(e.target.value as "field" | "synthetic")}
+          className={inputCls}>
+          <option value="field">Field measurement</option>
+          <option value="synthetic">Synthetic demonstration</option>
+        </select>
       </Field>
       {inFuture && (
         <p className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded-xl px-3 py-2">

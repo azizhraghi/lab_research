@@ -1,4 +1,5 @@
 from __future__ import annotations
+from agents.digitaltwin.services.experiment import experiment_inputs, experiment_snapshot
 
 import datetime as dt
 from typing import Optional
@@ -51,13 +52,8 @@ class SimulationAgent(BaseAgent):
         if not parcel:
             raise ValueError(f"Parcel {parcel_id} not found")
 
-        readings = await operational_readings(db, parcel)
-
-        latest_reading = readings[-1]
-        start_date = max(
-            dt.date.today(),
-            latest_reading.recorded_at.date() + dt.timedelta(days=1),
-        )
+        readings, start_date = await experiment_inputs(db, parcel, request)
+        latest_reading = readings[-1] if readings else None
         forecast = await get_current_forecast_coverage(
             db=db,
             parcel_id=parcel_id,
@@ -75,19 +71,15 @@ class SimulationAgent(BaseAgent):
             readings=readings,
             weather_inputs=forecast.inputs,
             config=ProjectionConfig(
-                **request.model_dump(),
+                **request.model_dump(exclude={"mode"}),
                 crop_coefficient=crop_coefficient,
                 weather_source=f"{forecast.provider} / {forecast.provider_model}",
                 forecast_retrieved_at=forecast.retrieved_at,
                 start_date=forecast.start_date,
             ),
         )
-        projection["assumptions"].update({
-            "source_reading_id": latest_reading.id,
-            "forecast_coverage_start": forecast.start_date.isoformat(),
-            "forecast_coverage_end": forecast.end_date.isoformat(),
-            **calibration_metadata,
-        })
+        projection["assumptions"].update(experiment_snapshot(parcel, request, readings, forecast))
+        projection["assumptions"].update(calibration_metadata)
 
         run = SimulationRun(
             parcel_id=parcel_id,

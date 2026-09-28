@@ -37,10 +37,10 @@ def run_water_balance_projection(
 ) -> dict[str, Any]:
     """Run baseline and modified parcel projections with explicit input provenance."""
     ordered = sorted(readings, key=lambda item: item.recorded_at)
-    if not ordered:
-        raise ValueError("At least one sensor/weather reading is required")
+    if not ordered and config.initial_moisture_mm is None:
+        raise ValueError("Provide an initial soil-moisture value when no field reading is available")
 
-    latest = ordered[-1]
+    latest = ordered[-1] if ordered else None
     initial = (
         float(config.initial_moisture_mm)
         if config.initial_moisture_mm is not None
